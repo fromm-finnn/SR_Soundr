@@ -8,7 +8,7 @@ import numpy as np
 class TrainingConfig:
     # 데이터 관련
     sample_num: int = 2400  # 세그먼트 길이 (0.05초 * 48000Hz)
-    microphone_num: int = 4 #16 4 
+    microphone_num: int = 2 #16 4 2
     output_num: int = 7  #위치(3) + 쿼터니언(4)
     
     # 데이터셋 설정
@@ -93,10 +93,8 @@ class TrainingConfig:
 
     # 마이크 배열 설정 (각도 증강에 필요)
     mic_positions: list = field(default_factory=lambda: [
-        [0, 0, 0],      # 첫 번째 마이크 (기준점)
-        [0.1, 0, 0],    # 두 번째 마이크
-        [0, 0.1, 0],    # 세 번째 마이크
-        [0.1, 0.1, 0]   # 네 번째 마이크
+        [0, 0, 0],      # 첫 번째 마이크 (기준점) - 0번 채널
+        [0, 0.1, 0]     # 두 번째 마이크 - 8번 채널
     ])
     speed_of_sound: float = 343.0  # 음속 (m/s)
     sample_rate: int = 48000       # 샘플링 레이트 (Hz)

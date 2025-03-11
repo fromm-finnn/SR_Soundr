@@ -15,7 +15,7 @@ class AudioDataset(Dataset):
         self.transform = transform
 
         # 채널 선택 추가
-        self.selected_channels = [0,4,8,12]  # [0,4,8,12]
+        self.selected_channels = [0, 8]  # [0,4,8,12] 에서 [0,8]로 변경
         print(f"선택된 마이크 채널: {self.selected_channels}")
             
         # 1. config 설정 (별도 메서드로 분리)
