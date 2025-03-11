@@ -9,7 +9,7 @@ from pathlib import Path
 from tqdm.auto import tqdm  # 수정된 import
 
 from dataset import AudioDataset
-from network import AudioNet
+from network import AudioNet, AudioNetV3  # AudioNetV3 추가
 from trainer import AudioTrainer
 from params import *
 from evaluate import evaluate_model, print_evaluation_results
@@ -132,7 +132,7 @@ def create_dataloaders(config):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("사용법: python main.py [train/test] [gpu_numbers] [checkpoint_path]")
+        print("사용법: python main.py [train/test] [gpu_numbers] [checkpoint_path] [model_version]")
         sys.exit(1)
 
     mode = sys.argv[1]
@@ -144,6 +144,9 @@ if __name__ == "__main__":
         gpu_numbers = "0"
         
     checkpoint_path = sys.argv[3] if len(sys.argv) > 3 else None
+    
+    # 모델 버전 파라미터 추가
+    model_version = sys.argv[4] if len(sys.argv) > 4 else "v3"  # 기본값은 v3
     
     # 초기 설정
     set_seeds()
@@ -172,15 +175,26 @@ if __name__ == "__main__":
             print(f"config.sample_num: {config.sample_num}")
             print(f"config.microphone_num: {config.microphone_num}")
             print(f"config.output_num: {config.output_num}")
+            print(f"모델 버전: {model_version}")
             print("============================\n")
             
-            # 모델 초기화
-            model = AudioNet(
-                sample_num=config.sample_num,
-                microphone_num=config.microphone_num,
-                output_num=config.output_num,
-                config=config
-            )
+            # 모델 초기화 - 버전에 따라 다른 모델 사용
+            if model_version.lower() == "v2":
+                print("AudioNet V2 모델 사용")
+                model = AudioNet(
+                    sample_num=config.sample_num,
+                    microphone_num=config.microphone_num,
+                    output_num=config.output_num,
+                    config=config
+                )
+            else:  # v3 또는 기타
+                print("AudioNet V3 모델 사용")
+                model = AudioNetV3(
+                    sample_num=config.sample_num,
+                    microphone_num=config.microphone_num,
+                    output_num=config.output_num,
+                    config=config
+                )
             
             model = model.to(device)
 
@@ -244,6 +258,7 @@ if __name__ == "__main__":
             config.batch_size = 128
             
             print(f"선택된 채널: {selected_channels}")
+            print(f"모델 버전: {model_version}")
             
             # 데이터로더 생성 (테스트용)
             _, _, test_loader = create_dataloaders(config)
@@ -251,13 +266,23 @@ if __name__ == "__main__":
             # 데이터셋의 채널 설정 업데이트
             test_loader.dataset.selected_channels = selected_channels
             
-            # 모델 초기화
-            model = AudioNet(
-                sample_num=config.sample_num,
-                microphone_num=config.microphone_num,
-                output_num=config.output_num,
-                config=config
-            ).to(device)
+            # 모델 초기화 - 버전에 따라 다른 모델 사용
+            if model_version.lower() == "v2":
+                print("AudioNet V2 모델 사용")
+                model = AudioNet(
+                    sample_num=config.sample_num,
+                    microphone_num=config.microphone_num,
+                    output_num=config.output_num,
+                    config=config
+                ).to(device)
+            else:  # v3 또는 기타
+                print("AudioNet V3 모델 사용")
+                model = AudioNetV3(
+                    sample_num=config.sample_num,
+                    microphone_num=config.microphone_num,
+                    output_num=config.output_num,
+                    config=config
+                ).to(device)
             
             if checkpoint_path:
                 print(f"체크포인트 로딩: {checkpoint_path}")
@@ -286,4 +311,4 @@ if __name__ == "__main__":
             print(f"평가 중 오류 발생: {str(e)}")
             raise e
     else:
-        print("사용법: python main.py [train/test] [gpu_number]")
+        print("사용법: python main.py [train/test] [gpu_number] [checkpoint_path] [model_version]")

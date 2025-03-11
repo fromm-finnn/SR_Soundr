@@ -11,3 +11,11 @@ split_info/
 *.pt
 *.log
 training_log.txt
+data/
+data_suss/
+__pycache__/
+*.pyc
+*.pth
+runs/
+checkpoints/
+.ipynb_checkpoints/

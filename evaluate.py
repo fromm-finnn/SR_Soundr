@@ -53,18 +53,28 @@ def evaluate_model(model, test_loader, device, config):
         20,     # 조용한 사무실 정도
         10,     # 일반적인 실내 환경
         0,      # 시끄러운 환경
-        -10,     # 매우 시끄러운 환경
-        -20
+        -10,    # 매우 시끄러운 환경
+        -20     # 극단적인 노이즈 환경
     ]
     
     # SNR을 노이즈 레벨로 변환
     noise_levels = [10 ** (-snr/20) for snr in target_snrs]
     results_by_noise = {}
     
-    # Latency 측정을 위한 변수 초기화
-    total_latency = 0.0
-    total_samples = 0
-    latencies = []  # 각 샘플별 latency를 저장할 리스트
+    # Warmup을 위한 더미 추론
+    print("\n=== 워밍업 수행중... ===")
+    dummy_input = torch.randn(1, config.microphone_num, config.sample_num, 
+                            device=device)
+    for _ in range(10):  # 10회 워밍업
+        with torch.no_grad():
+            model(dummy_input)
+    torch.cuda.synchronize()  # GPU 동기화
+    print("워밍업 완료")
+    
+    # 2채널 최적화 모드 확인
+    is_two_channel = getattr(model, 'optimize_for_two_channel', False)
+    if is_two_channel:
+        print("\n2채널 최적화 모드로 실행")
     
     for snr, noise_level in zip(target_snrs, noise_levels):
         print(f"\n=== 목표 SNR {snr}dB 테스트 ===")
@@ -75,21 +85,21 @@ def evaluate_model(model, test_loader, device, config):
                 'angle_errors': [],
                 'loss': 0,
                 'samples': 0,
-                'latencies': []  # 환경별 latency 저장
+                'latencies': []
             },
             'diff_user_same_space': {
                 'distance_errors': [],
                 'angle_errors': [],
                 'loss': 0,
                 'samples': 0,
-                'latencies': []  # 환경별 latency 저장
+                'latencies': []
             },
             'diff_user_diff_space': {
                 'distance_errors': [],
                 'angle_errors': [],
                 'loss': 0,
                 'samples': 0,
-                'latencies': []  # 환경별 latency 저장
+                'latencies': []
             }
         }
         
@@ -108,6 +118,8 @@ def evaluate_model(model, test_loader, device, config):
                     # 노이즈 추가
                     if noise_level > 0:
                         inputs, current_snr = add_noise_to_batch(inputs, noise_level)
+                    else:
+                        current_snr = float('inf')
                     
                     # 데이터를 디바이스로 이동
                     inputs = inputs.to(device)
@@ -115,8 +127,12 @@ def evaluate_model(model, test_loader, device, config):
                     rot_target = rot_target.to(device)
                     
                     # 각 샘플별로 latency 측정
+                    pos_preds = []
+                    rot_preds = []
+                    
                     for i in range(batch_size):
                         single_input = inputs[i:i+1]  # 단일 샘플 선택
+                        torch.cuda.synchronize()  # GPU 동기화
                         
                         # 추론 시작 시간 기록
                         start_time = time.time()
@@ -124,8 +140,7 @@ def evaluate_model(model, test_loader, device, config):
                         # 모델 추론
                         pos_pred_single, rot_pred_single = model(single_input)
                         
-                        # GPU 연산 완료 대기
-                        torch.cuda.synchronize()
+                        torch.cuda.synchronize()  # GPU 동기화
                         
                         # 추론 종료 시간 기록
                         end_time = time.time()
@@ -133,32 +148,21 @@ def evaluate_model(model, test_loader, device, config):
                         # Latency 계산 (밀리초 단위)
                         latency = (end_time - start_time) * 1000
                         batch_latencies.append(latency)
-                        latencies.append(latency)
                         
-                        total_latency += latency
-                        total_samples += 1
+                        # 예측 결과 저장
+                        pos_preds.append(pos_pred_single)
+                        rot_preds.append(rot_pred_single)
                     
-                    # 전체 배치에 대한 모델 추론 (메트릭 계산용)
-                    pos_pred, rot_pred = model(inputs)
+                    # 배치의 예측 결과를 하나의 텐서로 결합
+                    pos_pred = torch.cat(pos_preds, dim=0)
+                    rot_pred = torch.cat(rot_preds, dim=0)
                     
-                    # 세션 ID 찾기
-                    session_ids = []
-                    for i in range(batch_size):
-                        global_idx = total_processed + i
-                        if global_idx >= len(test_loader.dataset):
-                            break
-                            
-                        real_idx = test_loader.dataset.indices[global_idx]
-                        for sess_id, session in enumerate(test_loader.dataset.starts):
-                            if session['start'] <= real_idx < session['end']:
-                                session_ids.append(sess_id)
-                                break
-                    
-                    total_processed += batch_size
+                    # 세션 ID 가져오기
+                    batch_session_ids = test_loader.dataset.get_session_ids(batch_idx, batch_size)
                     
                     # 각 샘플별로 환경 분류하여 메트릭 계산
-                    for i in range(len(session_ids)):
-                        sess_id = session_ids[i]
+                    for i in range(batch_size):
+                        sess_id = batch_session_ids[i]
                         
                         # 환경 확인
                         if sess_id in test_loader.dataset.environment_sessions['same_user_same_space']:
@@ -180,12 +184,15 @@ def evaluate_model(model, test_loader, device, config):
                         env_metrics[env]['distance_errors'].append(distance_error)
                         env_metrics[env]['angle_errors'].append(angle_error)
                         env_metrics[env]['samples'] += 1
-                        env_metrics[env]['latencies'].append(batch_latencies[i])  # 환경별 latency 저장
+                        env_metrics[env]['latencies'].append(batch_latencies[i])
                     
                     # 진행 바 업데이트
-                    mean_dist = np.mean([err for env in env_metrics.values() for err in env['distance_errors']])
-                    mean_ang = np.mean([err for env in env_metrics.values() for err in env['angle_errors']])
+                    mean_dist = np.mean([err for env in env_metrics.values() 
+                                      for err in env['distance_errors']])
+                    mean_ang = np.mean([err for env in env_metrics.values() 
+                                     for err in env['angle_errors']])
                     mean_latency = np.mean(batch_latencies)
+                    
                     test_loader_tqdm.set_postfix(
                         mae=f"{mean_dist:.3f}m",
                         angle=f"{mean_ang:.2f}°",
@@ -193,34 +200,44 @@ def evaluate_model(model, test_loader, device, config):
                         latency=f"{mean_latency:.1f}ms"
                     )
         
-        results_by_noise[noise_level] = env_metrics
+        # 현재 SNR 레벨의 결과 저장
+        results_by_noise[snr] = env_metrics
+        
+        # 현재 SNR 레벨의 결과 출력
+        print(f"\n=== SNR {snr}dB 결과 ===")
+        for env, metrics in env_metrics.items():
+            if metrics['samples'] == 0:
+                continue
+                
+            avg_distance = np.mean(metrics['distance_errors'])
+            avg_angle = np.mean(metrics['angle_errors'])
+            avg_latency = np.mean(metrics['latencies'])
+            std_latency = np.std(metrics['latencies'])
+            
+            print(f"\n{env}:")
+            print(f"├─ 샘플 수: {metrics['samples']}")
+            print(f"├─ 거리 오차: {avg_distance:.3f}m")
+            print(f"├─ 각도 오차: {avg_angle:.1f}°")
+            print(f"├─ 평균 latency: {avg_latency:.2f}ms")
+            print(f"└─ Latency 표준편차: {std_latency:.2f}ms")
     
     # 전체 latency 통계 계산
-    avg_latency = total_latency / total_samples
-    std_latency = np.std(latencies)
-    min_latency = np.min(latencies)
-    max_latency = np.max(latencies)
-    p95_latency = np.percentile(latencies, 95)
-    p99_latency = np.percentile(latencies, 99)
+    all_latencies = [lat for snr_results in results_by_noise.values()
+                    for env_metrics in snr_results.values()
+                    for lat in env_metrics['latencies']]
     
-    print("\n=== Latency 통계 ===")
-    print(f"평균 추론 시간: {avg_latency:.2f}ms")
-    print(f"표준 편차: {std_latency:.2f}ms")
-    print(f"최소 추론 시간: {min_latency:.2f}ms")
-    print(f"최대 추론 시간: {max_latency:.2f}ms")
-    print(f"95퍼센타일: {p95_latency:.2f}ms")
-    print(f"99퍼센타일: {p99_latency:.2f}ms")
+    latency_stats = {
+        'avg': np.mean(all_latencies),
+        'std': np.std(all_latencies),
+        'min': np.min(all_latencies),
+        'max': np.max(all_latencies),
+        'p95': np.percentile(all_latencies, 95),
+        'p99': np.percentile(all_latencies, 99),
+        'all_latencies': all_latencies
+    }
     
     # latency 정보를 결과에 추가
-    results_by_noise['latency_stats'] = {
-        'avg': avg_latency,
-        'std': std_latency,
-        'min': min_latency,
-        'max': max_latency,
-        'p95': p95_latency,
-        'p99': p99_latency,
-        'all_latencies': latencies
-    }
+    results_by_noise['latency_stats'] = latency_stats
     
     return results_by_noise
 

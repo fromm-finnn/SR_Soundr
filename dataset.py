@@ -14,9 +14,14 @@ class AudioDataset(Dataset):
         self.mode = mode
         self.transform = transform
 
-        # 채널 선택 추가
-        self.selected_channels = [0, 8]  # [0,4,8,12] 에서 [0,8]로 변경
-        print(f"선택된 마이크 채널: {self.selected_channels}")
+        # 채널 선택 설정
+        # 2채널 최적화가 활성화된 경우 two_channel_indices 사용
+        if config and hasattr(config, 'optimize_for_two_channel') and config.optimize_for_two_channel:
+            self.selected_channels = list(config.two_channel_indices) if hasattr(config, 'two_channel_indices') else [0, 8]
+            print(f"2채널 최적화 모드 활성화: {self.selected_channels}")
+        else:
+            self.selected_channels = [0, 4, 8, 12]  # 기본 4채널 설정
+            print(f"4채널 모드 사용: {self.selected_channels}")
             
         # 1. config 설정 (별도 메서드로 분리)
         self._setup_config(config)

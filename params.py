@@ -8,7 +8,7 @@ import numpy as np
 class TrainingConfig:
     # 데이터 관련
     sample_num: int = 2400  # 세그먼트 길이 (0.05초 * 48000Hz)
-    microphone_num: int = 2 #16 4 2
+    microphone_num: int = 4 #16 4 2
     output_num: int = 7  #위치(3) + 쿼터니언(4)
     
     # 데이터셋 설정
@@ -36,7 +36,7 @@ class TrainingConfig:
     angle_error_threshold: float = 30.0    # 각도 오차 허용 임계값 (도)
     
     # 데이터 로더 설정
-    batch_size: int = 256
+    batch_size: int = 512
     num_workers: int = 16
     prefetch_factor: int = 4
     persistent_workers: bool = True
@@ -94,7 +94,9 @@ class TrainingConfig:
     # 마이크 배열 설정 (각도 증강에 필요)
     mic_positions: list = field(default_factory=lambda: [
         [0, 0, 0],      # 첫 번째 마이크 (기준점) - 0번 채널
-        [0, 0.1, 0]     # 두 번째 마이크 - 8번 채널
+        [0, 0.05, 0],   # 두 번째 마이크 - 4번 채널
+        [0, 0.1, 0],    # 세 번째 마이크 - 8번 채널
+        [0, 0.15, 0]    # 네 번째 마이크 - 12번 채널
     ])
     speed_of_sound: float = 343.0  # 음속 (m/s)
     sample_rate: int = 48000       # 샘플링 레이트 (Hz)
@@ -128,6 +130,26 @@ class TrainingConfig:
     lstm_num_layers: int = 2
     lstm_dropout: float = 0.3
     lstm_bidirectional: bool = True
+    
+    # AudioNetV3 관련 추가 설정
+    # 채널 어텐션 설정
+    channel_attention_reduction_ratio: int = 8  # 채널 어텐션의 차원 축소 비율
+    
+    # 셀프 어텐션 설정
+    self_attention_dropout: float = 0.1  # 셀프 어텐션의 드롭아웃 비율
+    
+    # CNN 커널 크기 설정 (V3에서는 더 큰 커널 사용)
+    kernel_sizes: Tuple[int, int, int] = (9, 7, 5)  # conv1, conv2, conv3의 커널 크기
+    
+    # 컨텍스트 모듈 설정
+    use_context_module: bool = True  # 컨텍스트 모듈 사용 여부
+    
+    # 위치-회전 연결 설정
+    use_position_for_rotation: bool = True  # 회전 예측에 위치 정보 사용 여부
+    
+    # 2채널 최적화 설정
+    optimize_for_two_channel: bool = False  # 2채널 최적화 활성화 여부
+    two_channel_indices: Tuple[int, int] = (0, 8)  # 2채널 모드에서 사용할 채널 인덱스
 
     def __post_init__(self):
         """초기화 후 처리"""
@@ -143,7 +165,7 @@ class TrainingConfig:
             
             # 실험 이름이 없으면 자동 생성
             if self.experiment_name is None:
-                self.experiment_name = ("dov_soundr_4ch(0,4,8,12)_lr5e5")
+                self.experiment_name = ("dov_soundr_4ch(0,4,8,12)_audionet_v3")
         
         # 데이터 분할 비율 검증
         total_ratio = self.train_ratio + self.val_ratio + self.test_ratio
