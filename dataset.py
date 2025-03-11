@@ -15,7 +15,7 @@ class AudioDataset(Dataset):
         self.transform = transform
 
         # 채널 선택 추가
-        self.selected_channels = [0,8]  # [0,4,8,12]
+        self.selected_channels = [0,4,8,12]  # [0,4,8,12]
         print(f"선택된 마이크 채널: {self.selected_channels}")
             
         # 1. config 설정 (별도 메서드로 분리)
@@ -425,18 +425,17 @@ class AudioDataset(Dataset):
         
     def get_session_ids(self, batch_idx, real_batch_size):
         """실제 배치 크기를 고려하여 세션 ID 반환"""
+        # config의 batch_size 대신 실제 배치 크기 사용
         start_idx = batch_idx * self.config.batch_size
         end_idx = start_idx + real_batch_size
         
-        # 디버깅 출력 추가
-        print(f"Debug: start_idx={start_idx}, end_idx={end_idx}, len(self)={len(self)}")
-        
-        if start_idx >= len(self):  # 시작 인덱스가 데이터셋 크기를 넘어가는지 체크
+        if start_idx >= len(self):
             print(f"Warning: start_idx {start_idx} exceeds dataset size {len(self)}")
             return []
-            
+                
         if end_idx > len(self):
             end_idx = len(self)
+            print(f"Debug: Adjusted end_idx to {end_idx}")
         
         session_ids = []
         for idx in range(start_idx, end_idx):
@@ -446,11 +445,7 @@ class AudioDataset(Dataset):
             for sess_id, session in enumerate(self.starts):
                 if session['start'] <= real_idx < session['end']:
                     session_ids.append(sess_id)
-                    break
-        
-        # 디버깅 출력 추가
-        print(f"Debug: Found {len(session_ids)} session ids for batch {batch_idx}")
-        
+                    break        
         return session_ids
         
     @staticmethod

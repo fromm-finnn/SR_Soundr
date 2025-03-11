@@ -26,7 +26,13 @@ class AudioTrainer:
         self.max_epochs = config.num_epochs
 
         # Mixed Precision 설정
-        self.scaler = torch.amp.GradScaler('cuda', enabled=config.use_amp)
+        self.scaler = torch.amp.GradScaler(
+            init_scale=2**10,
+            growth_factor=2.0,
+            backoff_factor=0.5,
+            growth_interval=100,
+            enabled=config.use_amp
+        )
         self.use_amp = config.use_amp
 
         # 손실 함수 및 옵티마이저 설정
@@ -176,14 +182,14 @@ class AudioTrainer:
         quat_loss = 1 - torch.abs(dot_product).mean()
         
         # 점진적 학습을 위한 손실 가중치 조정
-        if hasattr(self.model, 'current_epoch'):
-            if self.model.current_epoch < self.warmup_epochs:
+        if hasattr(self, 'current_epoch'):
+            if self.current_epoch < self.warmup_epochs:
                 # warmup 기간에는 위치 학습에만 집중
                 loss = self.position_loss_weight * pos_loss
                 current_rotation_weight = 0.0
             else:
                 # warmup 이후 회전 손실 점진적 도입
-                progress = min(1.0, (self.model.current_epoch - self.warmup_epochs) / 
+                progress = min(1.0, (self.current_epoch - self.warmup_epochs) / 
                              self.rotation_ramp_epochs)
                 current_rotation_weight = (self.final_rotation_weight - 
                                         self.initial_rotation_weight) * progress + \
@@ -206,159 +212,161 @@ class AudioTrainer:
             self.config.experiment_name
         )
         os.makedirs(self.timestamp_dir, exist_ok=True)
-
+        
         # 시작 에포크 설정 (체크포인트에서 복원된 값 사용)
         start_epoch = getattr(self, 'start_epoch', 1)
             
         for epoch in range(start_epoch, self.max_epochs + 1):
-            self.model.set_epoch(epoch)  # 현재 epoch 정보 모델에 전달
+            try:
+                # self.model.set_epoch(epoch)  # 현재 epoch 정보 모델에 전달
+                self.current_epoch = epoch  # 현재 epoch 정보 저장
 
-            epoch_start_time = time.time()
-            print(f"\n{'='*100}")
-            print(f"Epoch {epoch}/{self.max_epochs}".center(100))
-            print('='*100)
-                
-            self.model.train()
-            running_loss = 0.0
-
-            # 점진적 학습 상태 출력
-            print("\nProgressive Learning Status:")
-            if epoch < self.warmup_epochs:
-                print(f"Phase: Position only (Epoch {epoch}/{self.warmup_epochs})")
-                current_rotation_weight = 0.0
-            else:
-                progress = min(1.0, (epoch - self.warmup_epochs) / self.rotation_ramp_epochs)
-                current_rotation_weight = (self.final_rotation_weight - self.initial_rotation_weight) * progress + \
-                                        self.initial_rotation_weight
-                print(f"Phase: Position + Rotation (Progress: {progress:.2%})")
-                print(f"Current rotation weight: {current_rotation_weight:.4f}")
-                
-            # 지표 초기화
-            total_distance_error = 0.0
-            total_distance_error_sq = 0.0
-            total_angle_error = 0.0
-            num_within_target_distance = 0
-            num_within_target_angle = 0
-            total_samples = 0
-
-            # tqdm wrapper 생성
-            train_loader_tqdm = tqdm(self.train_loader, 
-                                    desc='Training', 
-                                    unit='batch',
-                                    dynamic_ncols=True)
-
-            for inputs, (pos_target, rot_target) in train_loader_tqdm:
-                batch_size = inputs.size(0)
+                epoch_start_time = time.time()
+                print(f"\n{'='*100}")
+                print(f"Epoch {epoch}/{self.max_epochs}".center(100))
+                print('='*100)
                     
-                # 디바이스로 이동
-                inputs = inputs.to(self.device)
-                pos_target = pos_target.to(self.device)
-                rot_target = rot_target.to(self.device)
+                self.model.train()
+                running_loss = 0.0
+
+                # 점진적 학습 상태 출력
+                print("\nProgressive Learning Status:")
+                if epoch < self.warmup_epochs:
+                    print(f"Phase: Position only (Epoch {epoch}/{self.warmup_epochs})")
+                    current_rotation_weight = 0.0
+                else:
+                    progress = min(1.0, (epoch - self.warmup_epochs) / self.rotation_ramp_epochs)
+                    current_rotation_weight = (self.final_rotation_weight - self.initial_rotation_weight) * progress + \
+                                            self.initial_rotation_weight
+                    print(f"Phase: Position + Rotation (Progress: {progress:.2%})")
+                    print(f"Current rotation weight: {current_rotation_weight:.4f}")
                     
-                self.optimizer.zero_grad()
-                    
-                with torch.amp.autocast('cuda', enabled=self.use_amp):
-                    pos_pred, rot_pred = self.model(inputs)
-                    loss, pos_loss, rot_loss = self.criterion(
-                        (pos_pred, rot_pred),
-                        (pos_target, rot_target)
+                # 지표 초기화
+                total_distance_error = 0.0
+                total_distance_error_sq = 0.0
+                total_angle_error = 0.0
+                num_within_target_distance = 0
+                num_within_target_angle = 0
+                total_samples = 0
+
+                # tqdm wrapper 생성
+                train_loader_tqdm = tqdm(self.train_loader, 
+                                        desc='Training', 
+                                        unit='batch',
+                                        dynamic_ncols=True)
+
+                for inputs, (pos_target, rot_target) in train_loader_tqdm:
+                    batch_size = inputs.size(0)
+                        
+                    # 디바이스로 이동
+                    inputs = inputs.to(self.device)
+                    pos_target = pos_target.to(self.device)
+                    rot_target = rot_target.to(self.device)
+                        
+                    self.optimizer.zero_grad()
+                        
+                    with torch.amp.autocast('cuda', enabled=self.use_amp):
+                        pos_pred, rot_pred = self.model(inputs)
+                        loss, pos_loss, rot_loss = self.criterion(
+                            (pos_pred, rot_pred),
+                            (pos_target, rot_target)
+                        )
+
+                    # Gradient scaling
+                    self.scaler.scale(loss).backward()
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.gradient_clip)
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+
+                    running_loss += loss.item() * batch_size
+                    self.n_iter += 1
+                    total_samples += batch_size
+
+                    # 배치별 메트릭 계산
+                    with torch.no_grad():
+                        # 위치 오차 계산
+                        distance_errors = torch.norm(pos_pred - pos_target, dim=1)
+                        mean_distance_error = distance_errors.mean().item()
+                        
+                        # 각도 오차 계산
+                        angle_diff = self.quaternion_angle_difference(
+                            F.normalize(rot_pred, p=2, dim=1),
+                            F.normalize(rot_target, p=2, dim=1)
+                        )
+                        mean_angle_error = angle_diff.mean().item()
+                        
+                        # 누적 메트릭 업데이트
+                        total_distance_error += distance_errors.sum().item()
+                        total_distance_error_sq += (distance_errors ** 2).sum().item()
+                        total_angle_error += angle_diff.sum().item()
+                        
+                        # 목표 달성률 계산
+                        num_within_target_distance += (distance_errors <= self.target_thresholds['distance']).sum().item()
+                        num_within_target_angle += (angle_diff <= self.target_thresholds['angle']).sum().item()
+
+                    # 진행 바 업데이트
+                    train_loader_tqdm.set_postfix(
+                        loss=loss.item(),
+                        pos_loss=pos_loss.item(),
+                        rot_loss=rot_loss.item(),
+                        mae=f"{mean_distance_error:.2f}m",
+                        angle_error=f"{mean_angle_error:.2f}°"
                     )
+                
+                # 에폭 종료 시 지표 계산
+                epoch_loss = running_loss / len(self.train_loader.dataset)
+                mae_distance_error = total_distance_error / total_samples
+                rmse_distance_error = math.sqrt(total_distance_error_sq / total_samples)
+                avg_angle_error = total_angle_error / total_samples
+                accuracy_target_distance = num_within_target_distance / total_samples
+                accuracy_target_angle = num_within_target_angle / total_samples
 
-                # Gradient scaling
-                self.scaler.scale(loss).backward()
-                self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.gradient_clip)
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
+                # 메트릭 저장
+                train_metrics = {
+                    'train_loss': epoch_loss,
+                    'train_mae': mae_distance_error,
+                    'train_rmse': rmse_distance_error,
+                    'train_angle_error': avg_angle_error,
+                    'train_target_dist_acc': accuracy_target_distance,
+                    'train_target_angle_acc': accuracy_target_angle,
+                    'train_paper_dist_ratio': mae_distance_error / self.paper_metrics['same_user_same_space']['distance'],
+                    'train_paper_angle_ratio': avg_angle_error / self.paper_metrics['same_user_same_space']['angle'],
+                    'current_rotation_weight': current_rotation_weight  # 현재 회전 가중치 추가
+                }
 
-                running_loss += loss.item() * batch_size
-                self.n_iter += 1
-                total_samples += batch_size
+                # Training 결과 출력
+                print("\n[Training Results]")
+                print(f"├─ Loss: {epoch_loss:.4f}")
+                print(f"├─ Current Rotation Weight: {current_rotation_weight:.4f}")
 
-                # 위치 오차 계산
-                with torch.no_grad():
-                    distance_errors = torch.sqrt(torch.sum((pos_pred - pos_target) ** 2, dim=1))
-                    mean_distance_error = distance_errors.mean().item()
-                    total_distance_error += distance_errors.sum().item()
-                    total_distance_error_sq += torch.sum(distance_errors ** 2).item()
+                print("\n1. Distance Metrics")
+                print(f"├─ Error Measurements")
+                print(f"│  ├─ MAE: {mae_distance_error:.4f}m (Paper: {self.paper_metrics['same_user_same_space']['distance']}m)")
+                print(f"│  └─ RMSE: {rmse_distance_error:.4f}m")
+                print(f"└─ Target Achievement")
+                print(f"   └─ Success Rate (<{self.target_thresholds['distance']}m): {accuracy_target_distance:.2%}")
 
-                    # 방향 오차 계산
-                    rot_pred = F.normalize(rot_pred, p=2, dim=1)
-                    rot_target = F.normalize(rot_target, p=2, dim=1)
-                    angle_diff = self.quaternion_angle_difference(rot_pred, rot_target)
-                    mean_angle_error = angle_diff.mean().item()
-                    total_angle_error += angle_diff.sum().item()
+                print("\n2. Angle Metrics")
+                print(f"├─ Error Measurements")
+                print(f"│  ├─ Mean Error: {avg_angle_error:.2f}° (Paper: {self.paper_metrics['same_user_same_space']['angle']}°)")
+                print(f"│  └─ Error Ratio: {(avg_angle_error/self.paper_metrics['same_user_same_space']['angle']):.2%} of paper")
+                print(f"└─ Target Achievement")
+                print(f"   └─ Success Rate (<{self.target_thresholds['angle']}°): {accuracy_target_angle:.2%}")
 
-                    # 임계값 내 샘플 수 계산
-                    num_within_target_distance += (distance_errors <= self.target_thresholds['distance']).sum().item()
-                    num_within_target_angle += (angle_diff <= self.target_thresholds['angle']).sum().item()
+                # 검증 수행
+                val_metrics = self.validate(epoch)
+                
+                self.save_metrics(epoch, train_metrics, val_metrics)
 
-                # 진행 바 업데이트
-                train_loader_tqdm.set_postfix(
-                    loss=loss.item(),
-                    pos_loss=pos_loss.item(),
-                    rot_loss=rot_loss.item(),
-                    mae=f"{mean_distance_error:.2f}m",
-                    angle_error=f"{mean_angle_error:.2f}°"
-                )
-                    
-            # 에폭 종료 시 지표 계산
-            epoch_loss = running_loss / len(self.train_loader.dataset)
-            mae_distance_error = total_distance_error / total_samples
-            rmse_distance_error = math.sqrt(total_distance_error_sq / total_samples)
-            avg_angle_error = total_angle_error / total_samples
-            accuracy_target_distance = num_within_target_distance / total_samples
-            accuracy_target_angle = num_within_target_angle / total_samples
-
-            # 메트릭 저장
-            train_metrics = {
-                'train_loss': epoch_loss,
-                'train_mae': mae_distance_error,
-                'train_rmse': rmse_distance_error,
-                'train_angle_error': avg_angle_error,
-                'train_target_dist_acc': accuracy_target_distance,
-                'train_target_angle_acc': accuracy_target_angle,
-                'train_paper_dist_ratio': mae_distance_error / self.paper_metrics['same_user_same_space']['distance'],
-                'train_paper_angle_ratio': avg_angle_error / self.paper_metrics['same_user_same_space']['angle'],
-                'current_rotation_weight': current_rotation_weight  # 현재 회전 가중치 추가
-            }
-
-            # Training 결과 출력
-            print("\n[Training Results]")
-            print(f"├─ Loss: {epoch_loss:.4f}")
-            print(f"├─ Current Rotation Weight: {current_rotation_weight:.4f}")
-
-            print("\n1. Distance Metrics")
-            print(f"├─ Error Measurements")
-            print(f"│  ├─ MAE: {mae_distance_error:.4f}m (Paper: {self.paper_metrics['same_user_same_space']['distance']}m)")
-            print(f"│  └─ RMSE: {rmse_distance_error:.4f}m")
-            print(f"└─ Target Achievement")
-            print(f"   └─ Success Rate (<{self.target_thresholds['distance']}m): {accuracy_target_distance:.2%}")
-
-            print("\n2. Angle Metrics")
-            print(f"├─ Error Measurements")
-            print(f"│  ├─ Mean Error: {avg_angle_error:.2f}° (Paper: {self.paper_metrics['same_user_same_space']['angle']}°)")
-            print(f"│  └─ Error Ratio: {(avg_angle_error/self.paper_metrics['same_user_same_space']['angle']):.2%} of paper")
-            print(f"└─ Target Achievement")
-            print(f"   └─ Success Rate (<{self.target_thresholds['angle']}°): {accuracy_target_angle:.2%}")
-
-            # 검증 수행
-            val_metrics = self.validate(epoch)
-            self.save_metrics(epoch, train_metrics, val_metrics)
-
-            # 매 10 에폭마다 또는 첫 에폭에서 그래프 저장
-            if epoch % 10 == 0 or epoch == 1:
-                self.plot_metrics(epoch)
-                print(f"\n[Visualization] Metrics plot saved at epoch {epoch}")
-
-                # 학습률 스케줄러 업데이트
+                # 학습률 스케줄러 업데이트 - 매 에포크마다 실행
                 if self.scheduler is not None:
                     if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
                         self.scheduler.step(val_metrics['val_loss'])
                     else:
                         self.scheduler.step()
 
-                # 복합 점수 계산 및 체크포인트 저장
+                # 복합 점수 계산 및 체크포인트 저장 - 매 에포크마다 실행
                 composite_score = (
                     0.3 * val_metrics['val_target_dist_acc'] +
                     0.7 * val_metrics['val_target_angle_acc']
@@ -374,7 +382,7 @@ class AudioTrainer:
                 if is_best_angle:
                     self.best_angle_acc = val_metrics['val_target_angle_acc']
 
-                # 체크포인트 저장
+                # 체크포인트 저장 - 매 에포크마다 실행
                 self.save_checkpoint(
                     epoch=epoch,
                     composite_score=composite_score,
@@ -382,8 +390,13 @@ class AudioTrainer:
                     is_best_composite=is_best_composite,
                     is_best_angle=is_best_angle
                 )
+                
+            except Exception as e:
+                print(f"\n[ERROR] 에포크 {epoch}에서 오류 발생: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                break
 
-        self.plot_metrics()  # 최종 그래프 저장
         self.writer.close()
         print("Training completed.")
 
@@ -419,6 +432,8 @@ class AudioTrainer:
         with torch.no_grad():
             with torch.amp.autocast('cuda', enabled=self.use_amp):
                 for batch_idx, (inputs, (pos_target, rot_target)) in enumerate(val_loader_tqdm):
+                    real_batch_size = inputs.size(0)
+                    
                     # 데이터를 디바이스로 이동
                     inputs = inputs.to(self.device)
                     pos_target = pos_target.to(self.device)
@@ -434,8 +449,10 @@ class AudioTrainer:
                     )
                         
                     # 배치의 세션 ID 가져오기
-                    batch_session_ids = self.val_loader.dataset.get_session_ids(batch_idx)
-                        
+                    batch_session_ids = self.val_loader.dataset.get_session_ids(
+                        batch_idx,
+                        real_batch_size
+                    )                        
                     # 각 샘플별로 환경 분류하여 메트릭 계산
                     for i, sess_id in enumerate(batch_session_ids):
                         # 환경 확인
@@ -536,48 +553,68 @@ class AudioTrainer:
 
     def save_checkpoint(self, epoch, composite_score=None, val_metrics=None, is_best_composite=False, is_best_angle=False):
         """체크포인트 저장 함수"""
-        checkpoint = {
-            'epoch': epoch,
-            'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
-            'scaler_state_dict': self.scaler.state_dict(),
-            'best_angle_acc': self.best_angle_acc,
-            'best_composite_score': self.best_composite_score,
-            'history': self.history,
-            'n_iter': self.n_iter,
-            # 점진적 학습 관련 정보 추가
-            'warmup_epochs': self.warmup_epochs,
-            'rotation_ramp_epochs': self.rotation_ramp_epochs,
-            'current_rotation_weight': self.final_rotation_weight if epoch >= self.warmup_epochs else 0.0
-        }
-            
-        if composite_score is not None:
-            checkpoint['composite_score'] = composite_score
-            
-        if val_metrics is not None:
-            checkpoint['angle_accuracy'] = val_metrics['val_target_angle_acc']
-            checkpoint['distance_accuracy'] = val_metrics['val_target_dist_acc']
-            
-        # 기본 체크포인트 저장
-        base_filename = f'model_epoch_{epoch}'
-            
-        # 최고 복합 점수인 경우
-        if is_best_composite:
-            filename = f'{base_filename}_best_composite.pth'
-            save_path = os.path.join(self.timestamp_dir, filename)
-            torch.save(checkpoint, save_path)
-            print(f"\n[Checkpoint] New best composite score: {self.best_composite_score:.2%}")
-            print(f"           Angle Acc: {val_metrics['val_target_angle_acc']:.2%}, "
-                f"Distance Acc: {val_metrics['val_target_dist_acc']:.2%}")
+        try:
+            checkpoint = {
+                'epoch': epoch,
+                'model_state_dict': self.model.state_dict(),
+                'optimizer_state_dict': self.optimizer.state_dict(),
+                'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
+                'scaler_state_dict': self.scaler.state_dict(),
+                'best_angle_acc': self.best_angle_acc,
+                'best_composite_score': self.best_composite_score,
+                'history': self.history,
+                'n_iter': self.n_iter,
+                # 점진적 학습 관련 정보 추가
+                'warmup_epochs': self.warmup_epochs,
+                'rotation_ramp_epochs': self.rotation_ramp_epochs,
+                'current_rotation_weight': self.final_rotation_weight if epoch >= self.warmup_epochs else 0.0
+            }
                 
-        # 최고 각도 정확도인 경우
-        if is_best_angle:
-            filename = f'{base_filename}_best_angle.pth'
-            save_path = os.path.join(self.timestamp_dir, filename)
-            torch.save(checkpoint, save_path)
-            print(f"\n[Checkpoint] New best angle accuracy: {self.best_angle_acc:.2%}")
+            if composite_score is not None:
+                checkpoint['composite_score'] = composite_score
                 
+            if val_metrics is not None:
+                checkpoint['angle_accuracy'] = val_metrics['val_target_angle_acc']
+                checkpoint['distance_accuracy'] = val_metrics['val_target_dist_acc']
+                
+            # 기본 체크포인트 저장
+            base_filename = f'model_epoch_{epoch}'
+                
+            # 최고 복합 점수인 경우
+            if is_best_composite:
+                filename = f'{base_filename}_best_composite.pth'
+                save_path = os.path.join(self.timestamp_dir, filename)
+                torch.save(checkpoint, save_path)
+                print(f"\n[Checkpoint] New best composite score: {self.best_composite_score:.2%}")
+                print(f"           Angle Acc: {val_metrics['val_target_angle_acc']:.2%}, "
+                    f"Distance Acc: {val_metrics['val_target_dist_acc']:.2%}")
+                    
+            # 최고 각도 정확도인 경우
+            if is_best_angle:
+                filename = f'{base_filename}_best_angle.pth'
+                save_path = os.path.join(self.timestamp_dir, filename)
+                torch.save(checkpoint, save_path)
+                print(f"\n[Checkpoint] New best angle accuracy: {self.best_angle_acc:.2%}")
+            
+            # 정기 체크포인트 저장 (10 에폭마다 또는 마지막 에폭)
+            if epoch % self.config.save_freq == 0 or epoch == self.max_epochs:
+                filename = f'{base_filename}.pth'
+                save_path = os.path.join(self.timestamp_dir, filename)
+                torch.save(checkpoint, save_path)
+                print(f"\n[Checkpoint] Regular checkpoint saved at epoch {epoch}")
+                
+                # 오래된 체크포인트 삭제 (최신 N개만 유지)
+                if hasattr(self.config, 'keep_last_n_checkpoints') and self.config.keep_last_n_checkpoints > 0:
+                    self._cleanup_old_checkpoints()
+            
+            return True  # 성공적으로 저장됨을 나타내는 값 반환
+            
+        except Exception as e:
+            print(f"\n[ERROR] 체크포인트 저장 중 오류 발생: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return False  # 저장 실패를 나타내는 값 반환
+
     def save_metrics(self, epoch, train_metrics, val_metrics):
         """메트릭 저장 함수"""
         # 기존 메트릭 저장
@@ -603,241 +640,36 @@ class AudioTrainer:
         self.writer.add_scalar('Training/Phase', 1 if current_phase == "full" else 0, epoch)
         self.writer.add_scalar('Training/RotationWeight', rotation_weight, epoch)
 
-    def plot_metrics(self, current_epoch=None):
-        # 데이터가 없으면 그래프를 그리지 않음
-        if not self.history['train_loss']:
-            print("No metrics data to plot yet.")
-            return
-                
-        # epochs 범위 설정
-        epochs = range(1, len(self.history['train_loss']) + 1)
-            
-        sns.set_style("whitegrid")
-        
-        # 메인 메트릭 그래프 (2x3 구조로 변경)
-        plt.figure(figsize=(20, 12))
-
-        # 폰트 크기 조정 (발표용)
-        plt.rcParams.update({
-            'font.size': 12,
-            'axes.labelsize': 14,
-            'axes.titlesize': 16,
-            'legend.fontsize': 12,
-            'axes.grid': True,
-            'grid.alpha': 0.7,
-            'grid.linestyle': '--'
-        })
-                
-        # 색상 팔레트 재정의
-        colors = {
-            'train_primary': '#2E86C1',    # 진한 파랑
-            'train_secondary': '#5DADE2',  # 연한 파랑
-            'val_primary': '#E74C3C',      # 진한 빨강
-            'val_secondary': '#F1948A',    # 연한 빨강
-            'phase_line': '#27AE60',       # 초록색 (학습 단계 구분선)
-            'weight_line': '#8E44AD'       # 보라색 (가중치 변화)
-        }
-            
-        # 1. Loss 그래프
-        plt.subplot(2, 3, 1)
-        plt.plot(epochs, self.history['train_loss'], color=colors['train_primary'], 
-                label='Train Loss', linewidth=2)
-        plt.plot(epochs, self.history['val_loss'], color=colors['val_primary'], 
-                label='Val Loss', linewidth=2)
-        
-        # Warmup 및 Ramp 구간 표시
-        if self.warmup_epochs > 0:
-            plt.axvline(x=self.warmup_epochs, color=colors['phase_line'], 
-                    linestyle='--', alpha=0.5, label='Warmup End')
-        
-        plt.title('Loss over epochs', fontsize=12, pad=10)
-        plt.xlabel('Epochs', fontsize=10)
-        plt.ylabel('Loss', fontsize=10)
-        plt.grid(True, linestyle='--', alpha=0.7)
-        plt.ylim(bottom=0)
-        plt.legend(fontsize=10)
-            
-        # 2. Distance Error 그래프
-        plt.subplot(2, 3, 2)
-        plt.plot(epochs, self.history['train_mae'], color=colors['train_primary'], 
-                label='Train MAE', linewidth=2)
-        plt.plot(epochs, self.history['train_rmse'], color=colors['train_secondary'], 
-                label='Train RMSE', linewidth=2)
-        plt.plot(epochs, self.history['val_mae'], color=colors['val_primary'], 
-                label='Val MAE', linewidth=2)
-        plt.plot(epochs, self.history['val_rmse'], color=colors['val_secondary'], 
-                label='Val RMSE', linewidth=2)
-        
-        if self.warmup_epochs > 0:
-            plt.axvline(x=self.warmup_epochs, color=colors['phase_line'], 
-                    linestyle='--', alpha=0.5, label='Warmup End')
-        
-        plt.title('Distance Errors', fontsize=12, pad=10)
-        plt.xlabel('Epochs', fontsize=10)
-        plt.ylabel('Error (meters)', fontsize=10)
-        plt.grid(True, linestyle='--', alpha=0.7)
-        plt.ylim(bottom=0)
-        plt.legend(fontsize=10)
-
-        # 3. Rotation Weight 그래프 (새로 추가)
-        plt.subplot(2, 3, 3)
-        rotation_weights = []
-        for epoch in epochs:
-            if epoch < self.warmup_epochs:
-                rotation_weights.append(0.0)
-            else:
-                progress = min(1.0, (epoch - self.warmup_epochs) / self.rotation_ramp_epochs)
-                weight = self.initial_rotation_weight + \
-                        (self.final_rotation_weight - self.initial_rotation_weight) * progress
-                rotation_weights.append(weight)
-        
-        plt.plot(epochs, rotation_weights, color=colors['weight_line'], 
-                label='Rotation Weight', linewidth=2)
-        plt.title('Rotation Weight Progression', fontsize=12, pad=10)
-        plt.xlabel('Epochs', fontsize=10)
-        plt.ylabel('Weight', fontsize=10)
-        plt.grid(True, linestyle='--', alpha=0.7)
-        plt.legend(fontsize=10)
-
-        # 4. Distance Accuracy 그래프
-        plt.subplot(2, 3, 4)
-        plt.plot(epochs, self.history['train_target_dist_acc'], color=colors['train_primary'], 
-                label=f'Train (<{self.target_thresholds["distance"]}m)', linewidth=2)
-        plt.plot(epochs, self.history['val_target_dist_acc'], color=colors['val_primary'], 
-                label=f'Val (<{self.target_thresholds["distance"]}m)', linewidth=2)
-        
-        if self.warmup_epochs > 0:
-            plt.axvline(x=self.warmup_epochs, color=colors['phase_line'], 
-                    linestyle='--', alpha=0.5, label='Warmup End')
-        
-        plt.title('Distance Accuracy', fontsize=12, pad=10)
-        plt.xlabel('Epochs', fontsize=10)
-        plt.ylabel('Accuracy (%)', fontsize=10)
-        plt.grid(True, linestyle='--', alpha=0.7)
-        plt.legend(fontsize=10)
-
-        # 5. Angle Accuracy 그래프
-        plt.subplot(2, 3, 5)
-        plt.plot(epochs, self.history['train_target_angle_acc'], color=colors['train_primary'], 
-                label=f'Train (<{self.target_thresholds["angle"]}°)', linewidth=2)
-        plt.plot(epochs, self.history['val_target_angle_acc'], color=colors['val_primary'], 
-                label=f'Val (<{self.target_thresholds["angle"]}°)', linewidth=2)
-        
-        if self.warmup_epochs > 0:
-            plt.axvline(x=self.warmup_epochs, color=colors['phase_line'], 
-                    linestyle='--', alpha=0.5, label='Warmup End')
-        
-        plt.title('Angle Accuracy', fontsize=12, pad=10)
-        plt.xlabel('Epochs', fontsize=10)
-        plt.ylabel('Accuracy (%)', fontsize=10)
-        plt.grid(True, linestyle='--', alpha=0.7)
-        plt.legend(fontsize=10)
-
-        # 6. Paper Comparison 그래프
-        plt.subplot(2, 3, 6)
-        plt.plot(epochs, self.history['train_paper_dist_ratio'], color=colors['train_primary'], 
-                label='Distance Ratio', linewidth=2)
-        plt.plot(epochs, self.history['train_paper_angle_ratio'], color=colors['train_secondary'], 
-                label='Angle Ratio', linewidth=2)
-        plt.axhline(y=1.0, color='red', linestyle='--', label='Paper Baseline')
-        
-        if self.warmup_epochs > 0:
-            plt.axvline(x=self.warmup_epochs, color=colors['phase_line'], 
-                    linestyle='--', alpha=0.5, label='Warmup End')
-        
-        plt.title('Performance vs Paper', fontsize=12, pad=10)
-        plt.xlabel('Epochs', fontsize=10)
-        plt.ylabel('Ratio to Paper Results', fontsize=10)
-        plt.grid(True, linestyle='--', alpha=0.7)
-        plt.legend(fontsize=10)
-
-        # 그리드 스타일 수정
-        for ax in plt.gcf().get_axes():
-            ax.grid(True, linestyle='--', alpha=0.7)
-            ax.set_axisbelow(True)
-            
-        plt.tight_layout(pad=3.0)
-            
-        # 저장
-        if current_epoch:
-            save_path = os.path.join(self.timestamp_dir, 
-                                f'training_metrics_epoch_{current_epoch}.png')
-        else:
-            save_path = os.path.join(self.timestamp_dir, 
-                                'training_metrics_final.png')
-            
-        plt.savefig(save_path, bbox_inches='tight', dpi=300)
-        plt.close()
-
-        # 환경별 성능 변화 그래프
-        self.plot_environment_metrics(current_epoch)
-
-    def plot_environment_metrics(self, current_epoch=None):
-        """환경별 성능 변화를 보여주는 별도의 그래프"""
-        plt.figure(figsize=(15, 6))
-        
-        # 데이터가 없으면 그래프를 그리지 않음
-        if not self.history['env_metrics']['same_user_same_space']['distance_errors']:
-            print("No environment metrics data to plot yet.")
-            return
-            
-        # epochs 범위 재계산
-        epochs = range(1, len(self.history['env_metrics']['same_user_same_space']['distance_errors']) + 1)
-            
-        # 1. 위치 오차 변화 추이
-        plt.subplot(1, 2, 1)
-        for env in self.paper_metrics.keys():
-            if (env in self.history['env_metrics'] and 
-                len(self.history['env_metrics'][env]['distance_errors']) > 0):
-                
-                plt.plot(epochs, self.history['env_metrics'][env]['distance_errors'], 
-                        linewidth=2, marker='o', label=env)
-                plt.axhline(y=self.paper_metrics[env]['distance'], 
-                        linestyle='--', alpha=0.5, label=f'{env} (Paper)')
-        
-        if self.warmup_epochs > 0:
-            plt.axvline(x=self.warmup_epochs, color='g', 
-                    linestyle='--', alpha=0.5, label='Warmup End')
-            
-        plt.title('Position Error by Environment')
-        plt.xlabel('Epochs')
-        plt.ylabel('Position Error (meters)')
-        plt.grid(True, linestyle='--', alpha=0.7)
-        plt.legend()
-
-        # 2. 각도 오차 변화 추이
-        plt.subplot(1, 2, 2)
-        for env in self.paper_metrics.keys():
-            if (env in self.history['env_metrics'] and 
-                len(self.history['env_metrics'][env]['angle_errors']) > 0):
-                
-                plt.plot(epochs, self.history['env_metrics'][env]['angle_errors'], 
-                        linewidth=2, marker='o', label=env)
-                plt.axhline(y=self.paper_metrics[env]['angle'], 
-                        linestyle='--', alpha=0.5, label=f'{env} (Paper)')
-        
-        if self.warmup_epochs > 0:
-            plt.axvline(x=self.warmup_epochs, color='g', 
-                    linestyle='--', alpha=0.5, label='Warmup End')
-            
-        plt.title('Orientation Error by Environment')
-        plt.xlabel('Epochs')
-        plt.ylabel('Orientation Error (degrees)')
-        plt.grid(True, linestyle='--', alpha=0.7)
-        plt.legend()
-
-        plt.tight_layout(pad=3.0)
-            
-        # 저장
-        if current_epoch:
-            save_path = os.path.join(self.timestamp_dir, 
-                                f'environment_metrics_epoch_{current_epoch}.png')
-        else:
-            save_path = os.path.join(self.timestamp_dir, 
-                                'environment_metrics_final.png')
-            
-        plt.savefig(save_path, bbox_inches='tight', dpi=300)
-        plt.close()
-
     def close(self):
         self.writer.close()
+
+    def _cleanup_old_checkpoints(self):
+        """오래된 정기 체크포인트 삭제 (최고 성능 체크포인트는 유지)"""
+        try:
+            # 정기 체크포인트 파일 목록 가져오기
+            checkpoint_files = []
+            for filename in os.listdir(self.timestamp_dir):
+                if filename.startswith('model_epoch_') and filename.endswith('.pth'):
+                    # 최고 성능 체크포인트는 제외
+                    if '_best_' not in filename:
+                        checkpoint_files.append(filename)
+            
+            # 에폭 번호 기준으로 정렬
+            checkpoint_files.sort(key=lambda x: int(x.split('_')[2].split('.')[0]), reverse=True)
+            
+            # 오래된 체크포인트 삭제
+            if len(checkpoint_files) > self.config.keep_last_n_checkpoints:
+                files_to_delete = checkpoint_files[self.config.keep_last_n_checkpoints:]
+                
+                for filename in files_to_delete:
+                    file_path = os.path.join(self.timestamp_dir, filename)
+                    try:
+                        os.remove(file_path)
+                        print(f"[Cleanup] Removed old checkpoint: {filename}")
+                    except Exception as e:
+                        print(f"[Cleanup] Error removing {filename}: {str(e)}")
+                
+        except Exception as e:
+            print(f"\n[ERROR] 체크포인트 정리 중 오류 발생: {str(e)}")
+            import traceback
+            traceback.print_exc()

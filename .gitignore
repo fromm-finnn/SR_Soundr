@@ -2,5 +2,12 @@ __pycache__/
 cache/
 checkpoints/
 data/
+data_suss/
+split_info/
 *.pyc
 *.pth
+*.npy
+*.npz
+*.pt
+*.log
+training_log.txt

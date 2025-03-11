@@ -12,7 +12,7 @@ from dataset import AudioDataset
 from network import AudioNet
 from trainer import AudioTrainer
 from params import *
-
+from evaluate import evaluate_model, print_evaluation_results
 def set_seeds(seed=24):
     """재현성을 위한 시드 설정"""
     random.seed(seed)
@@ -182,11 +182,6 @@ if __name__ == "__main__":
                 config=config
             )
             
-            # DataParallel로 감싸기
-            if torch.cuda.device_count() > 1:
-                print(f"\n{torch.cuda.device_count()}개의 GPU를 사용한 병렬 처리를 시작합니다.")
-                model = nn.DataParallel(model)
-            
             model = model.to(device)
 
             # Trainer 생성
@@ -244,9 +239,9 @@ if __name__ == "__main__":
     elif mode == "test":
         try:
             # 채널 직접 설정
-            selected_channels = [0, 8]  # 4채널 고정
-            config.microphone_num = 2
-            config.batch_size = 32
+            selected_channels = [0, 4, 8, 12]  # 필요에 따라 수정 
+            config.microphone_num = 4
+            config.batch_size = 128
             
             print(f"선택된 채널: {selected_channels}")
             
@@ -269,10 +264,23 @@ if __name__ == "__main__":
                 checkpoint = torch.load(checkpoint_path, map_location=device)
                 model.load_state_dict(checkpoint['model_state_dict'])
             
-            # 평가 실행
-            from evaluate import evaluate_model, print_evaluation_results
-            results = evaluate_model(model, test_loader, device, config)
-            print_evaluation_results(results, config)
+            # 노이즈 강건성 테스트 실행
+            print("\n=== 노이즈 강건성 테스트 시작 ===")
+            results_by_noise = evaluate_model(model, test_loader, device, config)
+            print_evaluation_results(results_by_noise, config)
+            
+            # 결과 저장 (선택적)
+            save_path = f"noise_test_results_{checkpoint_path.split('/')[-1].split('.')[0]}.npy"
+            np.save(save_path, {
+                str(k): {
+                    env: {
+                        'distance_errors': np.array(v[env]['distance_errors']),
+                        'angle_errors': np.array(v[env]['angle_errors']),
+                        'samples': v[env]['samples']
+                    } for env in v
+                } for k, v in results_by_noise.items()
+            })
+            print(f"\n결과가 {save_path}에 저장되었습니다.")
             
         except Exception as e:
             print(f"평가 중 오류 발생: {str(e)}")

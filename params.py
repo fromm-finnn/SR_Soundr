@@ -8,7 +8,7 @@ import numpy as np
 class TrainingConfig:
     # 데이터 관련
     sample_num: int = 1200  # 세그먼트 길이 (0.1초 * 48000Hz)
-    microphone_num: int = 2 #16 4 
+    microphone_num: int = 4 #16 4 
     output_num: int = 7  #위치(3) + 쿼터니언(4)
     
     # 데이터셋 설정
@@ -36,9 +36,9 @@ class TrainingConfig:
     angle_error_threshold: float = 30.0    # 각도 오차 허용 임계값 (도)
     
     # 데이터 로더 설정
-    batch_size: int = 128
+    batch_size: int = 256
     num_workers: int = 16
-    prefetch_factor: int = 2
+    prefetch_factor: int = 4
     persistent_workers: bool = True
     pin_memory: bool = True
     
@@ -62,8 +62,8 @@ class TrainingConfig:
     scaler_growth_interval: int = 100
     
     # 점진적 학습 관련 설정
-    warmup_epochs: int = 10  # 위치 학습에만 집중할 epoch 수
-    rotation_ramp_epochs: int = 10  # 회전 손실을 점진적으로 증가시킬 epoch 수
+    warmup_epochs: int = 5  # 위치 학습에만 집중할 epoch 수
+    rotation_ramp_epochs: int = 5  # 회전 손실을 점진적으로 증가시킬 epoch 수
     initial_rotation_weight: float = 0.0  # 초기 회전 손실 가중치
     final_rotation_weight: float = 4.0  # 최종 회전 손실 가중치
     position_loss_weight: float = 1.0  # 위치 손실 가중치
@@ -145,7 +145,7 @@ class TrainingConfig:
             
             # 실험 이름이 없으면 자동 생성
             if self.experiment_name is None:
-                self.experiment_name = ("dov_soundr_2ch_lr5e5")
+                self.experiment_name = ("dov_soundr_4ch(0,4,8,12)_lr5e5")
         
         # 데이터 분할 비율 검증
         total_ratio = self.train_ratio + self.val_ratio + self.test_ratio

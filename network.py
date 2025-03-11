@@ -2,73 +2,58 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import kornia
-import math
-
-class SelfAttention(nn.Module):
-    def __init__(self, in_dim):
-        super().__init__()
-        self.query = nn.Linear(in_dim, in_dim)
-        self.key = nn.Linear(in_dim, in_dim)
-        self.value = nn.Linear(in_dim, in_dim)
-        
-    def forward(self, x):
-        # x: (batch, seq_len, dim)
-        Q = self.query(x)
-        K = self.key(x)
-        V = self.value(x)
-        
-        # Scaled dot-product attention
-        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(x.size(-1))
-        attention = F.softmax(scores, dim=-1)
-        out = torch.matmul(attention, V)
-        return out
 
 class AudioNet(nn.Module):
-    def __init__(self, sample_num=4800, microphone_num=2, output_num=7, config=None):
+    def __init__(self, sample_num=1200, microphone_num=4, output_num=7, config=None):
         super(AudioNet, self).__init__()
         print(f"AudioNet 초기화 시작: sample_num={sample_num}, microphone_num={microphone_num}, output_num={output_num}")
         
+        # config 통합
         self.config = config
         self.use_amp = config.use_amp if config else True
-        self.current_epoch = 0  # 현재 epoch 추적용
         
-        # CNN 특징 추출부 (기존과 동일)
+        # 실제 샘플 수 계산 (4배 다운샘플링 적용)
+        actual_sample_num = sample_num // 4
+        print(f"실제 사용 샘플 수: {actual_sample_num} (4배 다운샘플링 적용)")
+        
+        # 커널 크기 설정
+        self.kernel_sizes = {
+            'conv1': 7,
+            'conv2': 5,
+            'conv3': 3
+        }
+        
+        # CNN 특징 추출기 - 더 효율적인 구조로 변경
         self.features = nn.Sequential(
-            nn.Conv2d(microphone_num, 64, kernel_size=(7,3), stride=(2,1), padding=(3,1), bias=False),
-            nn.BatchNorm2d(64),
+            # 첫 번째 블록 - stride 증가
+            nn.Conv1d(microphone_num, 64, kernel_size=self.kernel_sizes['conv1'], 
+                    padding=self.kernel_sizes['conv1']//2, stride=4, bias=False),
+            nn.BatchNorm1d(64),
             nn.LeakyReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=(4,1), stride=(4,1)),
             
-            nn.Conv2d(64, 128, kernel_size=(7,3), stride=(2,1), padding=(3,1), bias=False),
-            nn.BatchNorm2d(128),
+            # 두 번째 블록 - stride 증가
+            nn.Conv1d(64, 128, kernel_size=self.kernel_sizes['conv2'], 
+                    padding=self.kernel_sizes['conv2']//2, stride=4, bias=False),
+            nn.BatchNorm1d(128),
             nn.LeakyReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=(4,1), stride=(4,1)),
             
-            nn.Conv2d(128, 256, kernel_size=(7,3), stride=(1,1), padding=(3,1), bias=False),
-            nn.BatchNorm2d(256),
+            # 세 번째 블록 - 마지막 레이어
+            nn.Conv1d(128, 512, kernel_size=self.kernel_sizes['conv3'], 
+                    padding=self.kernel_sizes['conv3']//2, stride=1, bias=False),
+            nn.BatchNorm1d(512),
             nn.LeakyReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=(4,1), stride=(4,1)),
-            
-            nn.Conv2d(256, 512, kernel_size=(7,3), stride=(1,1), padding=(3,1), bias=False),
-            nn.BatchNorm2d(512),
-            nn.LeakyReLU(inplace=True),
+            nn.AdaptiveAvgPool1d(1)  # 적응형 풀링으로 변경 - 항상 1x1 출력
         )
         
-        # 특성 크기 계산 (기존과 동일)
-        with torch.no_grad():
-            dummy_input = torch.zeros(1, microphone_num, sample_num, config.sequence_length)
-            x = self.features(dummy_input)
-            self.feature_size = x.size(1) * x.size(2)
-            print(f"계산된 feature size: {self.feature_size}")
-        
-        # LSTM 및 Attention (기존과 동일)
+        # FC 레이어 - 고정 크기 사용
         self.fc = nn.Sequential(
-            nn.Linear(self.feature_size, 1024),
-            nn.LayerNorm(1024),
+            nn.Linear(512, 1024, bias=False),  # 512는 features의 출력 채널 수
+            nn.BatchNorm1d(1024),
             nn.LeakyReLU(inplace=True),
             nn.Dropout(config.dropout_rate if config else 0.5)
         )
         
+        # LSTM
         self.lstm = nn.LSTM(
             input_size=1024,
             hidden_size=512,
@@ -78,117 +63,91 @@ class AudioNet(nn.Module):
             bidirectional=True
         )
         
-        self.temporal_attention = SelfAttention(1024)
+        # 출력 레이어 분리 (위치와 회전)
+        self.fc_position = nn.Linear(1024, 3)  # 양방향 LSTM이므로 512*2=1024
+        self.fc_rotation = nn.Linear(1024, 4)
         
-        # 위치 예측 헤드 (기존과 동일)
-        self.fc_position = nn.Sequential(
-            nn.Linear(2048, 1024),
-            nn.LayerNorm(1024),
-            nn.LeakyReLU(inplace=True),
-            nn.Linear(1024, 3)
-        )
-        
-        # 방향 예측 헤드 (위치 정보 활용을 위해 수정)
-        self.fc_rotation = nn.Sequential(
-            nn.Linear(2048 + 3, 1024),  # 2048(특징) + 3(위치)
-            nn.LayerNorm(1024),
-            nn.LeakyReLU(inplace=True),
-            nn.Linear(1024, 4)
-        )
-        
+        # 가중치 초기화
         self._initialize_weights()
         print("AudioNet 초기화 완료")
     
-    def forward(self, x):
+    def _initialize_weights(self):
+        """가중치 초기화"""
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.BatchNorm1d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, 0, 0.01)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+    
+    def forward(self, x, hidden=None):
         batch_size = x.size(0)
+        sequence_length = x.size(3)  # 데이터 형태가 (batch, channels=4, samples=1200, seq_len=20)
         
-        # CNN 특징 추출
-        features = self.features(x)
-        features = features.permute(0, 3, 1, 2)
-        features = features.reshape(batch_size, -1, self.feature_size)
-        features = self.fc(features)
+        # Mixed Precision 사용
+        with torch.amp.autocast('cuda', enabled=self.use_amp): 
+            # 데이터 형태 변환 (batch, channels, samples, seq_len) -> (batch*seq_len, channels, samples)
+            x = x.permute(0, 3, 1, 2).contiguous()  # (batch, seq_len, channels, samples)
+            x = x.view(-1, x.size(2), x.size(3))    # (batch*seq_len, channels, samples)
             
-        # LSTM 및 Attention (기존과 동일)
-        lstm_out, _ = self.lstm(features)
-        attended = self.temporal_attention(lstm_out)
-        
-        global_context = attended.mean(dim=1)
-        local_context = attended[:, -1]
-        combined_context = torch.cat([global_context, local_context], dim=1)
-        
-        # 위치 먼저 예측
-        position = self.fc_position(combined_context)
-        
-        # 위치 정보를 방향 예측에 활용
-        rotation_features = torch.cat([combined_context, position], dim=1)
-        rotation = F.normalize(self.fc_rotation(rotation_features), p=2, dim=1)
+            # 한 번에 모든 프레임 처리
+            features = self.features(x)          # (batch*seq_len, 512, 1)
+            features = features.squeeze(-1)      # (batch*seq_len, 512)
+            features = self.fc(features)         # (batch*seq_len, 1024)
             
-        return position, rotation  # 튜플로 반환
-
+            # 원래 배치 및 시퀀스 형태로 복원
+            features = features.view(batch_size, sequence_length, -1)  # (batch, seq_len, 1024)
+            
+            # LSTM 처리
+            lstm_out, hidden = self.lstm(features)  # lstm_out: (batch, seq_len, hidden_size*2)
+            
+            # 마지막 시점의 출력 사용
+            x = lstm_out[:, -1]  # (batch, hidden_size*2)
+            
+            # 위치와 회전 분리 예측
+            position = self.fc_position(x)
+            rotation = self.fc_rotation(x)
+            
+            # 쿼터니언 정규화
+            rotation = F.normalize(rotation, p=2, dim=1)
+        
+        # 결과 반환
+        return position, rotation
+    
     def get_loss(self, pred, target):
-        pos_pred, quat_pred = pred  # 튜플로 받음
+        pos_pred, quat_pred = pred
         pos_target, quat_target = target[:, :3], target[:, 3:]
         
-        # 위치 손실
+        # 위치 손실 (동일)
         pos_loss = F.l1_loss(pos_pred, pos_target)
         
-        # 쿼터니온 손실 (기존과 동일)
+        # 쿼터니온 정규화
         quat_pred = F.normalize(quat_pred, p=2, dim=1)
         quat_target = F.normalize(quat_target, p=2, dim=1)
         
+        # 양방향 쿼터니온 손실 계산 (double cover 고려)
         dot_product_pos = torch.sum(quat_pred * quat_target, dim=1)
         dot_product_neg = torch.sum(quat_pred * (-quat_target), dim=1)
         
+        # 더 작은 각도를 주는 방향 선택
         dot_product = torch.where(
             torch.abs(dot_product_pos) > torch.abs(dot_product_neg),
             dot_product_pos,
             dot_product_neg
         )
         
+        # 안전한 범위로 클램핑
         dot_product = torch.clamp(dot_product, -1.0 + 1e-7, 1.0 - 1e-7)
-        quat_loss = 1 - torch.abs(dot_product).mean()
-            
-        # 점진적 학습을 위한 손실 가중치 조정
-        if self.current_epoch < self.config.warmup_epochs:
-            # warmup 기간에는 위치 학습에만 집중
-            total_loss = self.config.position_loss_weight * pos_loss
-        else:
-            # warmup 이후 회전 손실 점진적 도입
-            progress = min(1.0, (self.current_epoch - self.config.warmup_epochs) / 
-                        self.config.rotation_ramp_epochs)
-            current_rotation_weight = (self.config.final_rotation_weight - 
-                                    self.config.initial_rotation_weight) * progress + \
-                                    self.config.initial_rotation_weight
-            
-            total_loss = self.config.position_loss_weight * pos_loss + \
-                        current_rotation_weight * quat_loss
         
-        return total_loss, {'pos_loss': pos_loss.item(), 
-                        'quat_loss': quat_loss.item(),
-                        'rotation_weight': current_rotation_weight if 'current_rotation_weight' in locals() 
-                                            else 0.0}
-
-    def set_epoch(self, epoch):
-        """현재 epoch 설정"""
-        self.current_epoch = epoch
-
-    def _initialize_weights(self):
-        """가중치 초기화"""
-        for m in self.modules():
-            if isinstance(m, (nn.Conv2d, nn.Conv1d)):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='leaky_relu')
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-            elif isinstance(m, (nn.BatchNorm2d, nn.BatchNorm1d, nn.LayerNorm)):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='leaky_relu')
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.LSTM):
-                for name, param in m.named_parameters():
-                    if 'weight' in name:
-                        nn.init.orthogonal_(param)
-                    elif 'bias' in name:
-                        nn.init.constant_(param, 0)
+        # 각도 기반 손실 계산
+        quat_loss = 1 - torch.abs(dot_product).mean()
+        
+        # 전체 손실 계산
+        total_loss = self.config.position_loss_weight * pos_loss + \
+                    self.config.rotation_loss_weight * quat_loss
+        
+        return total_loss, {'pos_loss': pos_loss.item(), 'quat_loss': quat_loss.item()}

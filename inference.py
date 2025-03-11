@@ -11,7 +11,7 @@ class Config:
     """AudioNet 설정을 위한 임시 클래스"""
     def __init__(self):
         self.use_amp = True
-        self.sequence_length = 1  # inference에서는 1
+        self.sequence_length = 20  # inference에서는 1
         self.dropout_rate = 0.5
         self.warmup_epochs = 5
         self.rotation_ramp_epochs = 10
@@ -75,7 +75,12 @@ class SoundRInferencer:
         audio_tensor = torch.from_numpy(audio_norm).float()
         audio_tensor = audio_tensor.permute(1, 0)  # [channels, samples]
         audio_tensor = audio_tensor.unsqueeze(0)   # [1, channels, samples]
-        audio_tensor = audio_tensor.unsqueeze(-1)  # [1, channels, samples, 1]
+        audio_tensor = audio_tensor.unsqueeze(-1)  # [1, channels, samples, sequence_length]
+        
+        # sequence_length 차원을 모델이 기대하는 크기로 확장
+        if audio_tensor.size(-1) < 20:  # Config의 sequence_length 값
+            audio_tensor = audio_tensor.repeat(1, 1, 1, 20)
+        
         return audio_tensor
     
     def denormalize_position(self, position_tensor):
@@ -237,11 +242,11 @@ class SoundRInferencer:
         return stats
 
 def main():
-    model_path = "./checkpoints/dov_soundr_2ch_lr5e5/model_epoch_150_best_angle.pth" 
+    model_path = "./checkpoints/model_epoch_60_best_composite.pth" 
     audio_path = "data/test_sample_2ch.wav"
     
-    device = 'cpu'
-    # device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    # device = 'cpu'
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print("\n=== 하드웨어 정보 ===")
     print(f"Device: {device}")
     if torch.cuda.is_available():
