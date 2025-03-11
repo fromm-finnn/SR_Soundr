@@ -7,7 +7,7 @@ import numpy as np
 @dataclass
 class TrainingConfig:
     # 데이터 관련
-    sample_num: int = 1200  # 세그먼트 길이 (0.1초 * 48000Hz)
+    sample_num: int = 2400  # 세그먼트 길이 (0.05초 * 48000Hz)
     microphone_num: int = 4 #16 4 
     output_num: int = 7  #위치(3) + 쿼터니언(4)
     

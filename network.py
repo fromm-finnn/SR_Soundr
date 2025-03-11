@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import kornia
 
 class AudioNet(nn.Module):
-    def __init__(self, sample_num=1200, microphone_num=4, output_num=7, config=None):
+    def __init__(self, sample_num=2400, microphone_num=4, output_num=7, config=None):
         super(AudioNet, self).__init__()
         print(f"AudioNet 초기화 시작: sample_num={sample_num}, microphone_num={microphone_num}, output_num={output_num}")
         
@@ -23,40 +23,40 @@ class AudioNet(nn.Module):
             'conv3': 3
         }
         
-        # CNN 특징 추출기 - 더 효율적인 구조로 변경
+        # CNN 특징 추출기 - 적절한 채널 수 설정
         self.features = nn.Sequential(
             # 첫 번째 블록 - stride 증가
-            nn.Conv1d(microphone_num, 64, kernel_size=self.kernel_sizes['conv1'], 
+            nn.Conv1d(microphone_num, 96, kernel_size=self.kernel_sizes['conv1'], 
                     padding=self.kernel_sizes['conv1']//2, stride=4, bias=False),
-            nn.BatchNorm1d(64),
+            nn.BatchNorm1d(96),
             nn.LeakyReLU(inplace=True),
             
             # 두 번째 블록 - stride 증가
-            nn.Conv1d(64, 128, kernel_size=self.kernel_sizes['conv2'], 
+            nn.Conv1d(96, 192, kernel_size=self.kernel_sizes['conv2'], 
                     padding=self.kernel_sizes['conv2']//2, stride=4, bias=False),
-            nn.BatchNorm1d(128),
+            nn.BatchNorm1d(192),
             nn.LeakyReLU(inplace=True),
             
             # 세 번째 블록 - 마지막 레이어
-            nn.Conv1d(128, 512, kernel_size=self.kernel_sizes['conv3'], 
+            nn.Conv1d(192, 704, kernel_size=self.kernel_sizes['conv3'], 
                     padding=self.kernel_sizes['conv3']//2, stride=1, bias=False),
-            nn.BatchNorm1d(512),
+            nn.BatchNorm1d(704),
             nn.LeakyReLU(inplace=True),
             nn.AdaptiveAvgPool1d(1)  # 적응형 풀링으로 변경 - 항상 1x1 출력
         )
         
-        # FC 레이어 - 고정 크기 사용
+        # FC 레이어 - 적절한 크기 설정
         self.fc = nn.Sequential(
-            nn.Linear(512, 1024, bias=False),  # 512는 features의 출력 채널 수
-            nn.BatchNorm1d(1024),
+            nn.Linear(704, 1408, bias=False),  # 704는 features의 출력 채널 수
+            nn.BatchNorm1d(1408),
             nn.LeakyReLU(inplace=True),
             nn.Dropout(config.dropout_rate if config else 0.5)
         )
         
-        # LSTM
+        # LSTM - 적절한 크기 설정
         self.lstm = nn.LSTM(
-            input_size=1024,
-            hidden_size=512,
+            input_size=1408,
+            hidden_size=704,
             num_layers=2,
             batch_first=True,
             dropout=config.dropout_rate if config else 0.5,
@@ -64,8 +64,8 @@ class AudioNet(nn.Module):
         )
         
         # 출력 레이어 분리 (위치와 회전)
-        self.fc_position = nn.Linear(1024, 3)  # 양방향 LSTM이므로 512*2=1024
-        self.fc_rotation = nn.Linear(1024, 4)
+        self.fc_position = nn.Linear(1408, 3)  # 양방향 LSTM이므로 704*2=1408
+        self.fc_rotation = nn.Linear(1408, 4)
         
         # 가중치 초기화
         self._initialize_weights()
@@ -95,12 +95,12 @@ class AudioNet(nn.Module):
             x = x.view(-1, x.size(2), x.size(3))    # (batch*seq_len, channels, samples)
             
             # 한 번에 모든 프레임 처리
-            features = self.features(x)          # (batch*seq_len, 512, 1)
-            features = features.squeeze(-1)      # (batch*seq_len, 512)
-            features = self.fc(features)         # (batch*seq_len, 1024)
+            features = self.features(x)          # (batch*seq_len, 704, 1)
+            features = features.squeeze(-1)      # (batch*seq_len, 704)
+            features = self.fc(features)         # (batch*seq_len, 1408)
             
             # 원래 배치 및 시퀀스 형태로 복원
-            features = features.view(batch_size, sequence_length, -1)  # (batch, seq_len, 1024)
+            features = features.view(batch_size, sequence_length, -1)  # (batch, seq_len, 1408)
             
             # LSTM 처리
             lstm_out, hidden = self.lstm(features)  # lstm_out: (batch, seq_len, hidden_size*2)

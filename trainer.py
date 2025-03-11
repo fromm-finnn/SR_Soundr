@@ -404,6 +404,7 @@ class AudioTrainer:
         self.model.eval()
         running_loss = 0.0
         total_samples = 0
+        latencies = []  # latency 저장용 리스트
             
         # 환경별 메트릭 저장용 딕셔너리
         env_metrics = {
@@ -411,50 +412,65 @@ class AudioTrainer:
                 'distance_errors': [],
                 'angle_errors': [],
                 'loss': 0,
-                'samples': 0
+                'samples': 0,
+                'latencies': []  # 환경별 latency 저장
             },
             'diff_user_same_space': {
                 'distance_errors': [],
                 'angle_errors': [],
                 'loss': 0,
-                'samples': 0
+                'samples': 0,
+                'latencies': []  # 환경별 latency 저장
             },
             'diff_user_diff_space': {
                 'distance_errors': [],
                 'angle_errors': [],
                 'loss': 0,
-                'samples': 0
+                'samples': 0,
+                'latencies': []  # 환경별 latency 저장
             }
         }
 
         val_loader_tqdm = tqdm(self.val_loader, desc='Validation', unit='batch')
-            
+        
         with torch.no_grad():
             with torch.amp.autocast('cuda', enabled=self.use_amp):
                 for batch_idx, (inputs, (pos_target, rot_target)) in enumerate(val_loader_tqdm):
-                    real_batch_size = inputs.size(0)
+                    batch_size = inputs.size(0)
                     
-                    # 데이터를 디바이스로 이동
+                    # 데이터를 GPU로 이동
                     inputs = inputs.to(self.device)
                     pos_target = pos_target.to(self.device)
                     rot_target = rot_target.to(self.device)
                     
-                    # 모델 추론
+                    # SELD-net 방식으로 배치 단위 latency 측정
+                    start_time = time.time()
+                    
+                    # 모델 추론 (전체 배치)
                     pos_pred, rot_pred = self.model(inputs)
                     
-                    # 손실 계산
+                    end_time = time.time()
+                    
+                    # Latency 계산 (밀리초 단위)
+                    latency = (end_time - start_time) * 1000
+                    latencies.append(latency)
+                    
+                    # 손실 계산 - 튜플 형태로 전달
                     loss, pos_loss, rot_loss = self.criterion(
                         (pos_pred, rot_pred),
                         (pos_target, rot_target)
                     )
-                        
+                    
+                    running_loss += loss.item() * batch_size
+                    total_samples += batch_size
+                    
                     # 배치의 세션 ID 가져오기
-                    batch_session_ids = self.val_loader.dataset.get_session_ids(
-                        batch_idx,
-                        real_batch_size
-                    )                        
-                    # 각 샘플별로 환경 분류하여 메트릭 계산
-                    for i, sess_id in enumerate(batch_session_ids):
+                    batch_session_ids = self.val_loader.dataset.get_session_ids(batch_idx, batch_size)
+                    
+                    # 각 샘플에 대한 메트릭 계산
+                    for i in range(batch_size):
+                        sess_id = batch_session_ids[i]
+                        
                         # 환경 확인
                         if sess_id in self.val_loader.dataset.environment_sessions['same_user_same_space']:
                             env = 'same_user_same_space'
@@ -462,30 +478,28 @@ class AudioTrainer:
                             env = 'diff_user_same_space'
                         else:
                             env = 'diff_user_diff_space'
-                            
-                        # 개별 샘플의 오차 계산
-                        # 위치 오차
+                        
+                        # 거리 오차 계산
                         distance_error = torch.norm(pos_pred[i] - pos_target[i]).item()
-                            
-                        # 각도 오차
+                        
+                        # 각도 오차 계산
                         rot_pred_i = F.normalize(rot_pred[i:i+1], p=2, dim=1)
                         rot_target_i = F.normalize(rot_target[i:i+1], p=2, dim=1)
                         angle_error = self.quaternion_angle_difference(rot_pred_i, rot_target_i).item()
-                            
+                        
                         # 환경별 메트릭 저장
                         env_metrics[env]['distance_errors'].append(distance_error)
                         env_metrics[env]['angle_errors'].append(angle_error)
-                        env_metrics[env]['loss'] += loss.item() / inputs.size(0)  # 배치 크기로 나누기
+                        env_metrics[env]['loss'] += loss.item()
                         env_metrics[env]['samples'] += 1
-                            
-                        running_loss += loss.item() / inputs.size(0)
-                        total_samples += 1
-
+                        env_metrics[env]['latencies'].append(latency / batch_size)  # 샘플당 평균 latency 저장
+                    
                     # 진행 바 업데이트
                     val_loader_tqdm.set_postfix(
                         loss=running_loss/total_samples,
                         pos_loss=pos_loss.item(),
-                        rot_loss=rot_loss.item()
+                        rot_loss=rot_loss.item(),
+                        latency=f"{latency:.1f}ms"
                     )
 
                 # 환경별 결과 출력
@@ -497,6 +511,8 @@ class AudioTrainer:
                     avg_distance = np.mean(metrics['distance_errors'])
                     avg_angle = np.mean(metrics['angle_errors'])
                     avg_loss = metrics['loss'] / metrics['samples']
+                    avg_latency = np.mean(metrics['latencies'])
+                    std_latency = np.std(metrics['latencies'])
                         
                     within_dist = sum(d <= self.target_thresholds['distance'] 
                                     for d in metrics['distance_errors'])
@@ -509,7 +525,25 @@ class AudioTrainer:
                     print(f"├─ 거리 오차: {avg_distance:.3f}m (논문: {self.paper_metrics[env]['distance']}m)")
                     print(f"├─ 각도 오차: {avg_angle:.1f}° (논문: {self.paper_metrics[env]['angle']}°)")
                     print(f"├─ 목표 거리 달성률: {within_dist/metrics['samples']:.2%}")
-                    print(f"└─ 목표 각도 달성률: {within_angle/metrics['samples']:.2%}")
+                    print(f"├─ 목표 각도 달성률: {within_angle/metrics['samples']:.2%}")
+                    print(f"├─ 평균 latency: {avg_latency:.2f}ms")
+                    print(f"└─ Latency 표준편차: {std_latency:.2f}ms")
+
+                # 전체 latency 통계 계산
+                avg_latency = np.mean(latencies)
+                std_latency = np.std(latencies)
+                min_latency = np.min(latencies)
+                max_latency = np.max(latencies)
+                p95_latency = np.percentile(latencies, 95)
+                p99_latency = np.percentile(latencies, 99)
+
+                print("\n=== 전체 Latency 통계 ===")
+                print(f"├─ 평균 추론 시간: {avg_latency:.2f}ms")
+                print(f"├─ 표준 편차: {std_latency:.2f}ms")
+                print(f"├─ 최소 추론 시간: {min_latency:.2f}ms")
+                print(f"├─ 최대 추론 시간: {max_latency:.2f}ms")
+                print(f"├─ 95퍼센타일: {p95_latency:.2f}ms")
+                print(f"└─ 99퍼센타일: {p99_latency:.2f}ms")
 
                 # 전체 메트릭 계산
                 all_distance_errors = []
@@ -523,9 +557,15 @@ class AudioTrainer:
                     if env_metrics[env]['samples'] > 0:
                         avg_distance = np.mean(env_metrics[env]['distance_errors'])
                         avg_angle = np.mean(env_metrics[env]['angle_errors'])
+                        avg_latency = np.mean(env_metrics[env]['latencies'])
                             
                         self.history['env_metrics'][env]['distance_errors'].append(avg_distance)
                         self.history['env_metrics'][env]['angle_errors'].append(avg_angle)
+                        
+                        # latency 히스토리 추가
+                        if 'latencies' not in self.history['env_metrics'][env]:
+                            self.history['env_metrics'][env]['latencies'] = []
+                        self.history['env_metrics'][env]['latencies'].append(avg_latency)
                     
                 # 전체 메트릭 반환
                 return {
@@ -540,7 +580,15 @@ class AudioTrainer:
                     'val_paper_dist_ratio': np.mean(all_distance_errors) / 
                                         self.paper_metrics['same_user_same_space']['distance'],
                     'val_paper_angle_ratio': np.mean(all_angle_errors) / 
-                                            self.paper_metrics['same_user_same_space']['angle']
+                                            self.paper_metrics['same_user_same_space']['angle'],
+                    'val_latency': {
+                        'mean': avg_latency,
+                        'std': std_latency,
+                        'min': min_latency,
+                        'max': max_latency,
+                        'p95': p95_latency,
+                        'p99': p99_latency
+                    }
                 }
             
     def weights_init(self, m):
