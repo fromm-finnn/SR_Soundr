@@ -117,13 +117,6 @@ class AudioDataset(Dataset):
             # config에서 all_mic_positions가 있으면 선택된 채널에 맞게 마이크 위치 설정
             if hasattr(config, 'all_mic_positions') and len(config.all_mic_positions) >= 16:
                 self.mic_positions = [config.all_mic_positions[ch] for ch in self.selected_channels]
-                if not AudioDataset._initialized:
-                    print("선택된 채널에 맞게 마이크 위치 설정:")
-                    for i, (ch, pos) in enumerate(zip(self.selected_channels, self.mic_positions)):
-                        print(f"  채널 {ch}: 위치 {pos}")
-                    
-                    # 마이크 배열 격자 시각화 추가
-                    self._visualize_mic_grid()
             else:
                 # 기존 방식 유지 (config.mic_positions 사용)
                 self.mic_positions = getattr(config, 'mic_positions', [
@@ -132,10 +125,18 @@ class AudioDataset(Dataset):
                     [0.126, 0.126, 0],  # 세 번째 마이크 - 8번 채널 (M9)
                     [0.126, -0.042, 0]  # 네 번째 마이크 - 12번 채널 (M13)
                 ])
-                if not AudioDataset._initialized:
-                    print("기본 마이크 위치 사용")
             
             self.speed_of_sound = getattr(config, 'speed_of_sound', 343.0)
+            
+            # 마이크 위치 설정 정보 출력 (한 번만)
+            if not AudioDataset._initialized:
+                print(f"마이크 위치 설정 완료: {len(self.mic_positions)}개 채널")
+                for i, pos in enumerate(self.mic_positions):
+                    print(f"  채널 {i}: 위치 {pos}")
+                
+                # UMA-16 레이아웃 격자 시각화
+                if hasattr(config, '_visualize_mic_grid'):
+                    config._visualize_mic_grid()
         else:
             # 기본값 설정
             self.train_ratio = 0.8
@@ -537,42 +538,3 @@ class AudioDataset(Dataset):
         rotations = torch.stack([item[1][1] for item in batch])
         
         return inputs, (positions, rotations)
-
-    def _visualize_mic_grid(self):
-        """UMA-16 마이크 배열을 격자 형태로 시각화"""
-        # UMA-16 레이아웃 정의 (1-based 인덱스)
-        uma16_layout = [
-            [8, 7, 10, 9],    # 첫 번째 행 (위)
-            [6, 5, 12, 11],   # 두 번째 행
-            [4, 3, 14, 13],   # 세 번째 행
-            [2, 1, 16, 15]    # 네 번째 행 (아래)
-        ]
-        
-        # 0-based 인덱스로 변환
-        uma16_layout_0based = [[mic-1 for mic in row] for row in uma16_layout]
-        
-        # 선택된 채널 (0-based)
-        selected_channels = self.selected_channels
-        
-        print("\nUMA-16 마이크 배열 레이아웃:")
-        print("┌───┬───┬───┬───┐")
-        
-        for i, row in enumerate(uma16_layout_0based):
-            line = "│"
-            for j, mic_idx in enumerate(row):
-                # 선택된 채널이면 채널 번호로 표시, 아니면 '··'로 표시
-                if mic_idx in selected_channels:
-                    marker = f"{mic_idx:2d}"
-                else:
-                    marker = "··"
-                line += f" {marker} │"
-            print(line)
-            
-            # 마지막 행이 아니면 구분선 추가
-            if i < 3:
-                print("├───┼───┼───┼───┤")
-            else:
-                print("└───┴───┴───┴───┘")
-        
-        print("\n범례: 숫자 = 선택된 채널 인덱스, ·· = 선택되지 않은 채널")
-        print("위치: 위쪽 = 앞, 아래쪽 = 뒤, 왼쪽 = 왼쪽, 오른쪽 = 오른쪽")

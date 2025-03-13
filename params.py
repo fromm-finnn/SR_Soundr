@@ -223,13 +223,6 @@ class TrainingConfig:
         else:
             default_channels = [0, 4, 8, 12]
             self.mic_positions = [self.all_mic_positions[ch] for ch in default_channels]
-        
-        print(f"마이크 위치 설정 완료: {len(self.mic_positions)}개 채널")
-        for i, pos in enumerate(self.mic_positions):
-            print(f"  채널 {i}: 위치 {pos}")
-        
-        # UMA-16 레이아웃 격자 시각화
-        self._visualize_mic_grid()
     
     def _visualize_mic_grid(self):
         """UMA-16 마이크 배열을 격자 형태로 시각화"""
