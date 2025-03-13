@@ -6,6 +6,18 @@ from scipy.spatial.transform import Rotation as R
 
 
 class AudioDataset(Dataset):
+    # 클래스 변수로 초기화 상태 추적
+    _initialized = False
+    _env_sessions_initialized = False
+    _data_loaded = False
+    _env_sessions = None
+    _all_sequences = None
+    _session_map_full = None
+    _total_sequences = 0
+    _train_count = 0
+    _val_count = 0
+    _test_count = 0
+    
     def __init__(self, input_path, output_path, starts_path, config=None, mode='train', transform=None, fraction=1.0, env_type='same_user_same_space'):
         print(f"데이터셋 초기화 시작... (mode: {mode})")
         
@@ -13,15 +25,23 @@ class AudioDataset(Dataset):
         self.config = config
         self.mode = mode
         self.transform = transform
+        self.environment_type = env_type
 
         # 채널 선택 설정
+        # 명령줄에서 설정된 채널이 있으면 우선 사용
+        if config and hasattr(config, 'selected_channels') and config.selected_channels is not None:
+            self.selected_channels = config.selected_channels
+            if not AudioDataset._initialized:
+                print(f"명령줄 지정 채널 사용: {self.selected_channels}")
         # 2채널 최적화가 활성화된 경우 two_channel_indices 사용
-        if config and hasattr(config, 'optimize_for_two_channel') and config.optimize_for_two_channel:
+        elif config and hasattr(config, 'optimize_for_two_channel') and config.optimize_for_two_channel:
             self.selected_channels = list(config.two_channel_indices) if hasattr(config, 'two_channel_indices') else [0, 8]
-            print(f"2채널 최적화 모드 활성화: {self.selected_channels}")
+            if not AudioDataset._initialized:
+                print(f"2채널 최적화 모드 활성화: {self.selected_channels}")
         else:
             self.selected_channels = [0, 4, 8, 12]  # 기본 4채널 설정
-            print(f"4채널 모드 사용: {self.selected_channels}")
+            if not AudioDataset._initialized:
+                print(f"4채널 모드 사용: {self.selected_channels}")
             
         # 1. config 설정 (별도 메서드로 분리)
         self._setup_config(config)
@@ -29,14 +49,45 @@ class AudioDataset(Dataset):
         # 2. 데이터 분할 비율 검증
         self.validate_split_ratios()
         
-        # 3. 데이터 로드
-        self._load_data(input_path, output_path, starts_path)
+        # 3. 데이터 로드 
+        if not AudioDataset._data_loaded:
+            if not AudioDataset._initialized:
+                print("데이터 로드 중...")
+            self._load_data(input_path, output_path, starts_path)
+            AudioDataset._data_loaded = True
+            AudioDataset.inputs = self.inputs
+            AudioDataset.outputs = self.outputs
+            AudioDataset.starts = self.starts
+        else:
+            self.inputs = AudioDataset.inputs
+            self.outputs = AudioDataset.outputs
+            self.starts = AudioDataset.starts
         
-        # 4. 환경별 세션 분류 및 분할
-        self._classify_and_split_sessions(env_type, mode)
+        # 4. 환경별 세션 분류 및 분할 
+        if not AudioDataset._env_sessions_initialized:
+            self._classify_and_split_sessions(env_type)
+            AudioDataset._env_sessions_initialized = True
+            AudioDataset._env_sessions = self.environment_sessions
+            AudioDataset._all_sequences = self.all_sequences
+            AudioDataset._session_map_full = self.session_map_full
+            AudioDataset._total_sequences = len(self.all_sequences)
+        else:
+            self.environment_sessions = AudioDataset._env_sessions
+            self.all_sequences = AudioDataset._all_sequences
+            self.session_map_full = AudioDataset._session_map_full
         
-        # 5. 데이터셋 통계 출력
+        # 모드에 따라 인덱스 할당
+        self._assign_indices_by_mode(mode)
+        
+        # 5. 데이터셋 통계 출력 
+        if not AudioDataset._initialized and mode == 'train':
+            self.print_dataset_summary()
+        
+        # 현재 모드의 데이터셋 통계 출력
         self.print_dataset_statistics()
+        
+        # 초기화 완료 표시
+        AudioDataset._initialized = True
 
     def _setup_config(self, config):
         """config 설정"""
@@ -46,59 +97,54 @@ class AudioDataset(Dataset):
             self.val_ratio = getattr(config, 'val_ratio', 0.2)
             self.test_ratio = getattr(config, 'test_ratio', 0.1)
             self.random_seed = getattr(config, 'random_seed', 42)
-            self.environment_type = getattr(config, 'environment_type', 'same_user_same_space')
+            self.sequence_length = getattr(config, 'sequence_length', 20)
             
             # 오디오 관련 설정
             self.audio_mean = getattr(config, 'audio_mean', 0.0)
             self.audio_std = getattr(config, 'audio_std', 0.0008)
             self.pos_min = np.array(getattr(config, 'pos_min', [-3.70873404, 0.81547654, -13.88833714]))
             self.pos_max = np.array(getattr(config, 'pos_max', [1.81399226, 2.48111653, 4.08869743]))
+            
+            # 데이터 증강 설정
             self.use_augmentation = getattr(config, 'use_augmentation', False)
+            self.aug_params = {
+                'angle_aug_prob': getattr(config, 'angle_aug_prob', 0.5),
+                'noise_aug_prob': getattr(config, 'noise_aug_prob', 0.3),
+                'noise_level': getattr(config, 'noise_level', 0.01)
+            }
             
-
-            # 점진적 학습 관련 설정 추가
-            self.warmup_epochs = getattr(config, 'warmup_epochs', 20)
-            self.rotation_ramp_epochs = getattr(config, 'rotation_ramp_epochs', 10)
-            self.initial_rotation_weight = getattr(config, 'initial_rotation_weight', 0.0)
-            self.final_rotation_weight = getattr(config, 'final_rotation_weight', 3.0)
-            
-            # 증강 관련 설정 추가
-            self.aug_params = config.get_augmentation_params()
-            self.phase_shift_range = getattr(config, 'phase_shift_range', (-np.pi/8, np.pi/8))
-            self.attenuation_range = getattr(config, 'attenuation_range', (0.7, 1.0))
-            self.channel_variance = getattr(config, 'channel_variance', 0.1)
-            self.noise_smoothing_kernel = getattr(config, 'noise_smoothing_kernel', 5)
-            self.impulse_response_length = getattr(config, 'impulse_response_length', 32)
+            # 마이크 위치 및 음속 설정
+            self.mic_positions = getattr(config, 'mic_positions', [
+                [0, 0, 0],      # 첫 번째 마이크 (기준점)
+                [0, 0.05, 0],   # 두 번째 마이크
+                [0, 0.1, 0],    # 세 번째 마이크
+                [0, 0.15, 0]    # 네 번째 마이크
+            ])
+            self.speed_of_sound = getattr(config, 'speed_of_sound', 343.0)
         else:
             # 기본값 설정
-            self.train_ratio = 0.7
-            self.val_ratio = 0.15
-            self.test_ratio = 0.15
+            self.train_ratio = 0.8
+            self.val_ratio = 0.1
+            self.test_ratio = 0.1
             self.random_seed = 42
-            self.environment_type = 'same_user_same_space'
+            self.sequence_length = 20
+            self.use_augmentation = False
             self.audio_mean = 0.0
             self.audio_std = 0.0008
             self.pos_min = np.array([-3.70873404, 0.81547654, -13.88833714])
             self.pos_max = np.array([1.81399226, 2.48111653, 4.08869743])
-            self.use_augmentation = False
-
-        self.sequence_length = getattr(config, 'sequence_length', 30)  # 논문에서 제시한 시퀀스 길이
-
-
-    def get_sequence_angles(self, session_data, seq_len):
-        """시퀀스 단위로 각도 통계 계산"""
-        quaternions = session_data[:, 3:7]
-        rot = R.from_quat(quaternions)
-        euler_angles = rot.as_euler('xyz', degrees=True)
-        
-        angles = []
-        for i in range(0, len(euler_angles) - seq_len + 1):
-            seq = euler_angles[i:i + seq_len]
-            # 시퀀스의 대표 각도 (중간값 사용)
-            yaw = np.median(seq[:, 2])
-            pitch = np.median(seq[:, 1])
-            angles.append([yaw, pitch])
-        return np.array(angles)
+            self.aug_params = {
+                'angle_aug_prob': 0.5,
+                'noise_aug_prob': 0.3,
+                'noise_level': 0.01
+            }
+            self.mic_positions = [
+                [0, 0, 0],      # 첫 번째 마이크 (기준점)
+                [0, 0.05, 0],   # 두 번째 마이크
+                [0, 0.1, 0],    # 세 번째 마이크
+                [0, 0.15, 0]    # 네 번째 마이크
+            ]
+            self.speed_of_sound = 343.0
 
     def _load_data(self, input_path, output_path, starts_path):
         """데이터 로드"""
@@ -109,7 +155,7 @@ class AudioDataset(Dataset):
         print("세션 정보 로딩 중...")
         self.starts = np.load(starts_path, allow_pickle=True)
 
-    def _classify_and_split_sessions(self, env_type, mode):
+    def _classify_and_split_sessions(self, env_type):
         """환경별 세션 분류 및 분할"""
         print("\n=== 환경별 세션 분류 ===")
         self.environment_sessions = {
@@ -145,8 +191,8 @@ class AudioDataset(Dataset):
         print(f"전체 세션 수: {len(selected_env_sessions)}")
         
         # 모든 시퀀스를 하나로 모으기
-        all_sequences = []
-        session_map = []  # 각 시퀀스가 어느 세션에서 왔는지 추적
+        self.all_sequences = []
+        self.session_map_full = []  # 각 시퀀스가 어느 세션에서 왔는지 추적
         
         for sess_id in selected_env_sessions:
             session = self.starts[sess_id]
@@ -155,54 +201,42 @@ class AudioDataset(Dataset):
             
             # 시퀀스 길이를 고려하여 유효한 시작점들 추출
             valid_starts = list(range(start_idx, end_idx - self.sequence_length + 1))
-            all_sequences.extend(valid_starts)
-            session_map.extend([sess_id] * len(valid_starts))
+            self.all_sequences.extend(valid_starts)
+            self.session_map_full.extend([sess_id] * len(valid_starts))
         
         # 전체 시퀀스를 섞기
         np.random.seed(self.random_seed)  # 재현성을 위한 시드 설정
-        all_sequences = np.array(all_sequences)
-        session_map = np.array(session_map)
-        shuffle_idx = np.random.permutation(len(all_sequences))
-        all_sequences = all_sequences[shuffle_idx]
-        session_map = session_map[shuffle_idx]
+        self.all_sequences = np.array(self.all_sequences)
+        self.session_map_full = np.array(self.session_map_full)
+        shuffle_idx = np.random.permutation(len(self.all_sequences))
+        self.all_sequences = self.all_sequences[shuffle_idx]
+        self.session_map_full = self.session_map_full[shuffle_idx]
         
-        # train/val/test 분할
-        n_total = len(all_sequences)
+        # 데이터 분할 계산
+        n_total = len(self.all_sequences)
         n_train = int(n_total * self.train_ratio)
         n_val = int(n_total * self.val_ratio)
         
-        # 모드에 따라 인덱스 할당
+        # 클래스 변수에 저장
+        AudioDataset._train_count = n_train
+        AudioDataset._val_count = n_val
+        AudioDataset._test_count = n_total - n_train - n_val
+
+    def _assign_indices_by_mode(self, mode):
+        """모드에 따라 인덱스 할당"""
+        n_total = len(self.all_sequences)
+        n_train = AudioDataset._train_count
+        n_val = AudioDataset._val_count
+        
         if mode == 'train':
-            self.indices = all_sequences[:n_train]
-            self.session_map = session_map[:n_train]
+            self.indices = self.all_sequences[:n_train]
+            self.session_map = self.session_map_full[:n_train]
         elif mode == 'val':
-            self.indices = all_sequences[n_train:n_train + n_val]
-            self.session_map = session_map[n_train:n_train + n_val]
+            self.indices = self.all_sequences[n_train:n_train + n_val]
+            self.session_map = self.session_map_full[n_train:n_train + n_val]
         else:  # test
-            self.indices = all_sequences[n_train + n_val:]
-            self.session_map = session_map[n_train + n_val:]
-        
-        # 각도 분포 분석 및 출력
-        print("\n=== 데이터 분할 요약 ===")
-        print(f"전체 시퀀스 수: {n_total}")
-        print(f"학습 시퀀스 수: {n_train}")
-        print(f"검증 시퀀스 수: {n_val}")
-        print(f"테스트 시퀀스 수: {len(all_sequences) - n_train - n_val}")
-        print(f"현재 모드({mode}) 시퀀스 수: {len(self.indices)}")
-        
-        # 각도 분포 분석
-        if mode == 'train':
-            train_angles = self.get_sequence_angles(self.outputs[self.indices], self.sequence_length)
-            print("\n=== 학습 데이터 각도 분포 ===")
-            print(f"Yaw 범위: {np.min(train_angles[:,0]):.1f}° ~ {np.max(train_angles[:,0]):.1f}°")
-            print(f"Pitch 범위: {np.min(train_angles[:,1]):.1f}° ~ {np.max(train_angles[:,1]):.1f}°")
-        
-        # 세션별 데이터 포인트 수 출력
-        unique_sessions = np.unique(self.session_map)
-        print(f"\n현재 모드의 세션별 데이터 포인트 수:")
-        for sess_id in unique_sessions:
-            count = np.sum(self.session_map == sess_id)
-            print(f"세션 {sess_id}: {count} 포인트")
+            self.indices = self.all_sequences[n_train + n_val:]
+            self.session_map = self.session_map_full[n_train + n_val:]
 
     def validate_split_ratios(self):
         """데이터 분할 비율 검증"""
@@ -210,22 +244,69 @@ class AudioDataset(Dataset):
         if not np.isclose(total_ratio, 1.0):
             raise ValueError(f"분할 비율의 합이 1이 되어야 합니다. (현재: {total_ratio})")
 
-    def print_dataset_statistics(self):
-        """데이터셋 통계 출력"""
-        print("\n=== 데이터셋 통계 ===")
-        print(f"모드: {self.mode}")
+    def print_dataset_summary(self):
+        """전체 데이터셋 요약 정보 출력 (한 번만 호출)"""
+        n_total = AudioDataset._total_sequences
+        n_train = AudioDataset._train_count
+        n_val = AudioDataset._val_count
+        n_test = AudioDataset._test_count
         
-        # session_map에서 유니크한 세션 수를 계산
+        print("\n=== 데이터셋 초기화 요약 ===")
+        print(f"환경 타입: {self.environment_type}")
+        print(f"총 세션 수: {len(self.environment_sessions[self.environment_type])}")
+        print(f"총 데이터 포인트 수: {n_total:,}")
+        
+        print("\n데이터 분할:")
+        print(f"- 학습: {n_train:,} 포인트 ({n_train/n_total:.1%})")
+        print(f"- 검증: {n_val:,} 포인트 ({n_val/n_total:.1%})")
+        print(f"- 테스트: {n_test:,} 포인트 ({n_test/n_total:.1%})")
+        
+        # 각도 분포 분석
+        train_angles = self.get_sequence_angles(self.outputs[self.indices], self.sequence_length)
+        print("\n=== 학습 데이터 각도 분포 ===")
+        print(f"Yaw 범위: {np.min(train_angles[:,0]):.1f}° ~ {np.max(train_angles[:,0]):.1f}°")
+        print(f"Pitch 범위: {np.min(train_angles[:,1]):.1f}° ~ {np.max(train_angles[:,1]):.1f}°")
+        
+        # 세션별 데이터 분포 표 형식으로 출력
+        print("\n세션별 데이터 분포:")
+        print("세션 ID | 학습 | 검증 | 테스트 | 합계")
+        print("--------|------|------|--------|------")
+        
+        # 각 세션별 데이터 포인트 수 계산
+        unique_sessions = np.unique(self.session_map_full)
+        for sess_id in unique_sessions:
+            train_count = np.sum(self.session_map_full[:n_train] == sess_id)
+            val_count = np.sum(self.session_map_full[n_train:n_train+n_val] == sess_id)
+            test_count = np.sum(self.session_map_full[n_train+n_val:] == sess_id)
+            total_count = train_count + val_count + test_count
+            
+            print(f"{sess_id:8d} | {train_count:4d} | {val_count:4d} | {test_count:6d} | {total_count:5d}")
+
+    def print_dataset_statistics(self):
+        """현재 모드의 데이터셋 통계 출력"""
+        print(f"\n=== 데이터셋 통계 ({self.mode}) ===")
         unique_sessions = np.unique(self.session_map)
         print(f"세션 수: {len(unique_sessions)}")
-        print(f"데이터 포인트 수: {len(self.indices)}")
-        
-        # 현재 모드의 환경별 통계만 출력
-        if hasattr(self, 'environment_type'):
-            print(f"\n현재 환경 ({self.environment_type}) 통계:")
-            total_datapoints = len(self.indices)
-            print(f"  - 세션 수: {len(unique_sessions)}")
-            print(f"  - 데이터 포인트 수: {total_datapoints}")
+        print(f"데이터 포인트 수: {len(self.indices):,}")
+
+    def get_sequence_angles(self, outputs, sequence_length):
+        """시퀀스의 각도 정보 추출"""
+        angles = []
+        for i in range(0, len(outputs), sequence_length):
+            if i + sequence_length > len(outputs):
+                break
+                
+            # 쿼터니언에서 오일러 각도로 변환
+            quat = outputs[i, 3:7]  # 쿼터니언 (w, x, y, z)
+            rot = R.from_quat(quat)
+            euler = rot.as_euler('xyz', degrees=True)
+            
+            # yaw와 pitch 추출
+            yaw = euler[2]   # z축 회전
+            pitch = euler[1]  # y축 회전
+            
+            angles.append([yaw, pitch])
+        return np.array(angles)
 
     def augment_audio(self, audio, position, quaternion):
         """
@@ -261,16 +342,11 @@ class AudioDataset(Dataset):
 
     def _calculate_delays(self, position, quaternion):
         """마이크별 시간 지연 계산"""
-        # 마이크 배열의 상대 위치 (예시 값)
-        mic_positions = np.array([
-            [0, 0, 0],  # 첫 번째 마이크를 기준점으로
-            [0.1, 0, 0],
-            [0, 0.1, 0],
-            [0.1, 0.1, 0]
-        ])
+        # 마이크 배열의 상대 위치 (config에서 가져옴)
+        mic_positions = np.array(self.mic_positions)
         
         # 음속 (m/s)
-        speed_of_sound = 343.0
+        speed_of_sound = self.speed_of_sound
         
         # 화자 방향 벡터 계산
         rot = R.from_quat(quaternion)
@@ -292,12 +368,19 @@ class AudioDataset(Dataset):
         sample_rate = 48000  # 샘플링 레이트
         delayed_audio = torch.zeros_like(audio)
         
-        for ch in range(audio.shape[0]):
+        # 채널 수와 지연 배열 길이 확인
+        n_channels = min(audio.shape[0], len(delays))
+        
+        for ch in range(n_channels):
             delay_samples = int(delays[ch] * sample_rate)
             if delay_samples > 0:
                 delayed_audio[ch] = torch.roll(audio[ch], shifts=delay_samples, dims=1)
             else:
                 delayed_audio[ch] = audio[ch]
+        
+        # 나머지 채널은 원본 그대로 유지
+        if audio.shape[0] > n_channels:
+            delayed_audio[n_channels:] = audio[n_channels:]
         
         return delayed_audio
 
@@ -338,39 +421,6 @@ class AudioDataset(Dataset):
         
         return smoothed_noise
 
-        """
-        audio: shape [n_channels, sequence_length, samples]
-        """
-        # 홀수 길이의 임펄스 응답 생성
-        ir_length = self.config.impulse_response_length
-        if ir_length % 2 == 0:  # 짝수면 홀수로 만들기
-            ir_length += 1
-            
-        impulse_response = torch.zeros(ir_length)
-        impulse_response[0] = 1.0
-        mid_point = ir_length // 3
-        impulse_response[mid_point] = self.config.early_reflection_factor
-        impulse_response[-1] = self.config.late_reflection_factor
-        
-        output = torch.zeros_like(audio)
-        for ch in range(audio.shape[0]):
-            for seq in range(audio.shape[1]):
-                # [1, 1, samples]로 reshape
-                audio_frame = audio[ch, seq].unsqueeze(0).unsqueeze(0)
-                # [1, 1, ir_length]로 reshape
-                ir = impulse_response.unsqueeze(0).unsqueeze(0)
-                
-                # 컨볼루션 적용 (explicit padding)
-                pad_size = ir_length // 2
-                padded_audio = torch.nn.functional.pad(audio_frame, (pad_size, pad_size), mode='reflect')
-                output[ch, seq] = torch.nn.functional.conv1d(
-                    padded_audio,
-                    ir,
-                    padding=0  # explicit padding을 사용했으므로 0
-                ).squeeze()
-        
-        return output
-
     def normalize_audio(self, audio):
         """오디오 데이터 정규화"""
         # 전체 스케일만 조정 (너무 큰 값이나 작은 값 방지)
@@ -394,9 +444,16 @@ class AudioDataset(Dataset):
         sequence_indices = range(start_idx, start_idx + sequence_length)
         x = self.inputs[sequence_indices]  # [sequence_length, all_channels, samples]
         
-        # 채널 선택 및 다운샘플링
-        x = x[:, self.selected_channels]   # [sequence_length, n_selected_channels, samples]
-        x = x[:, :, ::4]                   # 4배 다운샘플링
+        try:
+            # 채널 선택 및 다운샘플링
+            x = x[:, self.selected_channels]   # [sequence_length, n_selected_channels, samples]
+            x = x[:, :, ::4]                   # 4배 다운샘플링
+        except Exception as e:
+            print(f"\n=== 오류 발생: __getitem__ 채널 선택 중 ===")
+            print(f"오류 메시지: {str(e)}")
+            print(f"입력 데이터 형태: {x.shape}")
+            print(f"선택할 채널: {self.selected_channels}")
+            raise e
         
         # 정규화
         x = self.normalize_audio(x)
@@ -419,7 +476,7 @@ class AudioDataset(Dataset):
         # 위치 정규화
         position_normalized = self.normalize_position(position)
         
-        # 쿼터니온 정규화 (단위 벡터로)
+        # 쿼터니언 정규화 (단위 벡터로)
         quaternion = quaternion / (np.linalg.norm(quaternion) + 1e-7)
         
         # 위치와 회전을 별도로 반환

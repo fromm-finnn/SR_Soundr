@@ -6,13 +6,16 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
 import torch.cuda.amp as amp
 from pathlib import Path
-from tqdm.auto import tqdm  # 수정된 import
+from tqdm.auto import tqdm  
+import argparse  
+import os
 
 from dataset import AudioDataset
-from network import AudioNet, AudioNetV3  # AudioNetV3 추가
+from network import AudioNetV3  
 from trainer import AudioTrainer
 from params import *
 from evaluate import evaluate_model, print_evaluation_results
+
 def set_seeds(seed=24):
     """재현성을 위한 시드 설정"""
     random.seed(seed)
@@ -25,7 +28,6 @@ def set_seeds(seed=24):
 def setup_device(gpu_numbers):
     """여러 GPU 설정"""
     if torch.cuda.is_available():
-        # 쉼표로 구분된 GPU 번호 처리
         if isinstance(gpu_numbers, str) and ',' in gpu_numbers:
             gpu_list = [int(x) for x in gpu_numbers.split(',')]
             device = torch.device("cuda")
@@ -54,6 +56,8 @@ def create_dataloaders(config):
     # 데이터 경로 설정
     data_dir = Path("data")
     
+    print("\n=== 데이터셋 초기화 중... ===")
+    
     # 학습/검증/테스트용 데이터셋 생성
     train_dataset = AudioDataset(
         input_path=data_dir / "input.npy",
@@ -75,7 +79,7 @@ def create_dataloaders(config):
         env_type=config.environment_type
     )
     
-    test_dataset = AudioDataset(  # 테스트 데이터셋 추가
+    test_dataset = AudioDataset( 
         input_path=data_dir / "input.npy",
         output_path=data_dir / "output.npy",
         starts_path=data_dir / "starts.npy",
@@ -85,12 +89,13 @@ def create_dataloaders(config):
         env_type=config.environment_type
     )
     
-    print(f"학습 데이터 크기: {len(train_dataset)}")
-    print(f"검증 데이터 크기: {len(val_dataset)}")
-    print(f"테스트 데이터 크기: {len(test_dataset)}")  # 테스트 크기 출력 추가
+    # 데이터셋 크기 요약 출력
+    print(f"\n=== 데이터셋 크기 요약 ===")
+    print(f"학습: {len(train_dataset):,} 샘플")
+    print(f"검증: {len(val_dataset):,} 샘플")
+    print(f"테스트: {len(test_dataset):,} 샘플")
     
     # DataLoader 생성
-    # DataLoader 생성 (collate_fn 추가)
     train_loader = DataLoader(
         train_dataset,
         batch_size=config.batch_size,
@@ -100,7 +105,7 @@ def create_dataloaders(config):
         persistent_workers=config.persistent_workers,
         prefetch_factor=config.prefetch_factor,
         drop_last=True,
-        collate_fn=AudioDataset.collate_fn  # 추가
+        collate_fn=AudioDataset.collate_fn  
     )
     
     val_loader = DataLoader(
@@ -112,7 +117,7 @@ def create_dataloaders(config):
         persistent_workers=config.persistent_workers,
         prefetch_factor=config.prefetch_factor,
         drop_last=True,
-        collate_fn=AudioDataset.collate_fn  # 추가
+        collate_fn=AudioDataset.collate_fn  
     )
     
     test_loader = DataLoader(
@@ -124,33 +129,101 @@ def create_dataloaders(config):
         persistent_workers=config.persistent_workers,
         prefetch_factor=config.prefetch_factor,
         drop_last=False,
-        collate_fn=AudioDataset.collate_fn  # 추가
+        collate_fn=AudioDataset.collate_fn  
     )
     
     return train_loader, val_loader, test_loader
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("사용법: python main.py [train/test] [gpu_numbers] [checkpoint_path] [model_version]")
-        sys.exit(1)
-
-    mode = sys.argv[1]
+    # argparse를 사용하여 명령줄 인자 처리
+    parser = argparse.ArgumentParser(description='SoundR-DL 학습 및 평가')
     
-    # GPU 번호 처리 수정
-    if len(sys.argv) > 2:
-        gpu_numbers = sys.argv[2]  # 문자열 그대로 유지
+    # 필수 인자
+    parser.add_argument('mode', type=str, choices=['train', 'test'], 
+                        help='실행 모드 (train 또는 test)')
+    
+    # 선택적 인자
+    parser.add_argument('--gpu', type=str, default='0',
+                        help='사용할 GPU 번호 (쉼표로 구분, 기본값: 0)')
+    parser.add_argument('--checkpoint', type=str, default=None,
+                        help='로드할 체크포인트 경로')
+    
+    # 마이크 및 시퀀스 관련 인자
+    parser.add_argument('--mic_num', type=int, default=4,
+                        help='마이크 채널 수 (기본값: 4)')
+    parser.add_argument('--mic_array', type=str, default='0,4,8,12',
+                        help='사용할 마이크 인덱스 (쉼표로 구분, 기본값: 0,4,8,12)')
+    parser.add_argument('--sequence_length', type=int, default=20,
+                        help='시퀀스 길이 (기본값: 20)')
+    parser.add_argument('--optimize_two_channel', action='store_true',
+                        help='2채널 최적화 활성화 (기본값: False)')
+    
+    # 학습 관련 인자 
+    parser.add_argument('--batch_size', type=int, default=None,
+                        help='배치 크기 (기본값: params.py에서 설정)')
+    parser.add_argument('--learning_rate', type=float, default=None,
+                        help='학습률 (기본값: params.py에서 설정)')
+    
+    # 테스트 관련 인자 
+    parser.add_argument('--run_snr_test', action='store_true',
+                        help='SNR 테스트 실행 여부 (기본값: False)')
+    
+    # 체크포인트 관련 인자 
+    parser.add_argument('--experiment_name', type=str, default=None,
+                        help='실험 이름 (체크포인트 저장 폴더명, 기본값: 자동 생성)')
+    
+    args = parser.parse_args()
+    
+    # 인자 처리
+    mode = args.mode
+    gpu_numbers = args.gpu
+    checkpoint_path = args.checkpoint
+    
+    # 마이크 및 시퀀스 설정
+    config.microphone_num = args.mic_num
+    print(f"마이크 채널 수 설정: {config.microphone_num}")
+    
+    # 마이크 배열 설정
+    mic_array = [int(idx) for idx in args.mic_array.split(',')]
+    # 명시적으로 config.selected_channels 설정
+    config.selected_channels = mic_array
+    print(f"선택된 마이크 채널: {config.selected_channels}")
+    
+    # 2채널 최적화 설정
+    if args.optimize_two_channel and args.mic_num == 2:
+        config.optimize_for_two_channel = True
+        config.two_channel_indices = tuple(mic_array)
+        print(f"2채널 최적화 활성화: {config.optimize_for_two_channel}")
+        print(f"2채널 인덱스: {config.two_channel_indices}")
     else:
-        gpu_numbers = "0"
-        
-    checkpoint_path = sys.argv[3] if len(sys.argv) > 3 else None
+        config.optimize_for_two_channel = False
     
-    # 모델 버전 파라미터 추가
-    model_version = sys.argv[4] if len(sys.argv) > 4 else "v3"  # 기본값은 v3
+    # 시퀀스 길이 설정
+    config.sequence_length = args.sequence_length
+    print(f"시퀀스 길이 설정: {config.sequence_length}")
+    
+    # 배치 크기 설정 (명령줄에서 지정된 경우에만 변경)
+    if args.batch_size is not None:
+        config.batch_size = args.batch_size
+        config.test_batch_size = args.batch_size  # 테스트 배치 크기도 동일하게 설정
+    print(f"배치 크기 설정: {config.batch_size}")
+    
+    # 학습률 설정 (명령줄에서 지정된 경우에만 변경)
+    if args.learning_rate is not None:
+        config.learning_rate = args.learning_rate
+    print(f"학습률 설정: {config.learning_rate}")
+    
+    # 실험 이름 설정 (체크포인트 저장 폴더명)
+    if args.experiment_name:
+        config.experiment_name = args.experiment_name
+        print(f"실험 이름 설정: {config.experiment_name}")
+    else:
+        pass
     
     # 초기 설정
     set_seeds()
-    device = setup_device(gpu_numbers)  # 수정된 setup_device 함수 사용
+    device = setup_device(gpu_numbers)  
     
     # 데이터 경로 설정
     data_dir = Path("data")
@@ -161,154 +234,162 @@ if __name__ == "__main__":
     if mode == "train":
         try:
             # 데이터로더 생성
-            train_loader, val_loader, test_loader = create_dataloaders(config)  # test_loader 추가
+            train_loader, val_loader, test_loader = create_dataloaders(config)  
             print("데이터로더 생성 완료!")
             
-            # 샘플 데이터 확인
-            sample_input, (sample_pos, sample_rot) = next(iter(train_loader))
-            print(f"입력 형태: {sample_input.shape}")
-            print(f"위치 출력 형태: {sample_pos.shape}")
-            print(f"회전 출력 형태: {sample_rot.shape}")
+            # 데이터셋 채널 설정 확인
+            print(f"채널 설정: {train_loader.dataset.selected_channels}")
             
-            # AudioNet 초기화 파라미터 확인 추가
-            print("\n=== AudioNet 초기화 파라미터 ===")
-            print(f"config.sample_num: {config.sample_num}")
-            print(f"config.microphone_num: {config.microphone_num}")
-            print(f"config.output_num: {config.output_num}")
-            print(f"모델 버전: {model_version}")
-            print("============================\n")
+            try:
+                # 샘플 데이터 확인
+                sample_input, (sample_pos, sample_rot) = next(iter(train_loader))
+            except Exception as e:
+                print(f"샘플 데이터 확인 중 오류 발생: {str(e)}")
+                import traceback
+                traceback.print_exc()
             
-            # 모델 초기화 - 버전에 따라 다른 모델 사용
-            if model_version.lower() == "v2":
-                print("AudioNet V2 모델 사용")
-                model = AudioNet(
-                    sample_num=config.sample_num,
-                    microphone_num=config.microphone_num,
-                    output_num=config.output_num,
-                    config=config
-                )
-            else:  # v3 또는 기타
-                print("AudioNet V3 모델 사용")
-                model = AudioNetV3(
-                    sample_num=config.sample_num,
-                    microphone_num=config.microphone_num,
-                    output_num=config.output_num,
-                    config=config
-                )
-            
-            model = model.to(device)
-
-            # Trainer 생성
-            trainer = AudioTrainer(
-                model=model,
-                train_loader=train_loader,
-                val_loader=val_loader,
-                device=device,
+            # 모델 초기화 
+            model = AudioNetV3(
+                sample_num=config.sample_num,
+                microphone_num=config.microphone_num,
+                output_num=config.output_num,
                 config=config
             )
-
-            if checkpoint_path:
-                print(f"체크포인트 로딩: {checkpoint_path}")
-                checkpoint = torch.load(checkpoint_path, map_location=device)
-                
-                # 모델 가중치 로드
-                model.load_state_dict(checkpoint['model_state_dict'])
-                
-                # 옵티마이저 상태 로드 및 수정
-                optimizer_state = checkpoint['optimizer_state_dict']
-                for param_group in optimizer_state['param_groups']:
-                    param_group['lr'] = config.learning_rate
-                    param_group['weight_decay'] = config.weight_decay
-                trainer.optimizer.load_state_dict(optimizer_state)
-                
-                # 시작 에포크 설정
-                trainer.start_epoch = checkpoint['epoch'] + 1
-                
-                # 스케줄러 설정 및 상태 복원
-                if config.scheduler == "cosine":
-                    trainer.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                        trainer.optimizer,
-                        T_max=config.num_epochs,
-                        eta_min=config.learning_rate * 0.01
-                    )
-                    # 현재 에포크까지 스케줄러 진행
-                    for _ in range(trainer.start_epoch - 1):
-                        trainer.scheduler.step()
-                
-                # 학습 히스토리 복원
-                if 'history' in checkpoint:
-                    trainer.history = checkpoint['history']
-                    trainer.n_iter = checkpoint['n_iter']
-                    trainer.best_angle_acc = checkpoint['best_angle_acc']
-                    trainer.best_composite_score = checkpoint['best_composite_score']
-                
-                print(f"체크포인트 로딩 완료 (에포크 {trainer.start_epoch}부터 시작)")
-
-            # 학습 시작
-            trainer.train()
             
+            # 모델을 GPU로 이동
+            model = model.to(device)
+            
+            try:
+                # Trainer 생성
+                trainer = AudioTrainer(
+                    model=model,
+                    train_loader=train_loader,
+                    val_loader=val_loader,
+                    device=device,
+                    config=config
+                )
+                
+                # 학습 시작
+                trainer.train()
+                
+            except Exception as e:
+                print(f"Trainer 생성 중 오류 발생: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                raise e
+
+            # 체크포인트 로딩
+            if checkpoint_path:
+                try:
+                    checkpoint = torch.load(checkpoint_path, map_location=device)
+                    model.load_state_dict(checkpoint['model_state_dict'])
+                    print(f"체크포인트 로딩 완료: {checkpoint_path}")
+                except Exception as e:
+                    print(f"체크포인트 로딩 중 오류 발생: {str(e)}")
+
         except Exception as e:
             print(f"오류 발생: {str(e)}")
+            import traceback
+            traceback.print_exc()
             raise e
     elif mode == "test":
         try:
-            # 채널 직접 설정
-            selected_channels = [0, 4, 8, 12]  # 필요에 따라 수정 
-            config.microphone_num = 4
-            config.batch_size = 128
-            
-            print(f"선택된 채널: {selected_channels}")
-            print(f"모델 버전: {model_version}")
+            # 채널 설정 - config에서 가져오기
+            print(f"선택된 채널: {config.selected_channels}")
+            print(f"마이크 채널 수: {config.microphone_num}")
             
             # 데이터로더 생성 (테스트용)
             _, _, test_loader = create_dataloaders(config)
             
-            # 데이터셋의 채널 설정 업데이트
-            test_loader.dataset.selected_channels = selected_channels
+            # 모델 초기화 - AudioNetV3만 사용
+            print("AudioNetV3 모델 사용")
+            model = AudioNetV3(
+                sample_num=config.sample_num,
+                microphone_num=config.microphone_num,
+                output_num=config.output_num,
+                config=config
+            )
             
-            # 모델 초기화 - 버전에 따라 다른 모델 사용
-            if model_version.lower() == "v2":
-                print("AudioNet V2 모델 사용")
-                model = AudioNet(
-                    sample_num=config.sample_num,
-                    microphone_num=config.microphone_num,
-                    output_num=config.output_num,
-                    config=config
-                ).to(device)
-            else:  # v3 또는 기타
-                print("AudioNet V3 모델 사용")
-                model = AudioNetV3(
-                    sample_num=config.sample_num,
-                    microphone_num=config.microphone_num,
-                    output_num=config.output_num,
-                    config=config
-                ).to(device)
+            # 모델을 GPU로 이동 
+            model = model.to(device)
+            print(f"모델을 {device}로 이동했습니다.")
             
             if checkpoint_path:
                 print(f"체크포인트 로딩: {checkpoint_path}")
-                checkpoint = torch.load(checkpoint_path, map_location=device)
+                checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
                 model.load_state_dict(checkpoint['model_state_dict'])
+                print("체크포인트 로딩 완료")
+            else:
+                print("경고: 체크포인트가 제공되지 않았습니다. 초기화된 모델로 평가합니다.")
             
-            # 노이즈 강건성 테스트 실행
-            print("\n=== 노이즈 강건성 테스트 시작 ===")
-            results_by_noise = evaluate_model(model, test_loader, device, config)
-            print_evaluation_results(results_by_noise, config)
-            
-            # 결과 저장 (선택적)
-            save_path = f"noise_test_results_{checkpoint_path.split('/')[-1].split('.')[0]}.npy"
-            np.save(save_path, {
-                str(k): {
+            # SNR 테스트 실행 여부 확인
+            if args.run_snr_test:
+                # 노이즈 강건성 테스트 실행
+                print("\n=== 노이즈 강건성 테스트 시작 ===")
+                results_by_noise = evaluate_model(model, test_loader, device, config)
+                print_evaluation_results(results_by_noise, config)
+                
+                # 결과 저장 디렉토리 생성
+                os.makedirs("./results", exist_ok=True)
+                
+                # 결과 저장 (선택적)
+                if checkpoint_path:
+                    save_path = f"./results/noise_test_results_{checkpoint_path.split('/')[-1].split('.')[0]}.npy"
+                else:
+                    save_path = f"./results/noise_test_results_initialized_model.npy"
+                    
+                np.save(save_path, {
+                    str(k): {
+                        env: {
+                            'distance_errors': np.array(v[env]['distance_errors']),
+                            'angle_errors': np.array(v[env]['angle_errors']),
+                            'samples': v[env]['samples']
+                        } for env in v
+                    } for k, v in results_by_noise.items()
+                })
+                print(f"\n결과가 {save_path}에 저장되었습니다.")
+            else:
+                # 기본 평가만 실행 (SNR 테스트 없이)
+                print("\n=== 기본 모델 평가 시작 ===")
+                # evaluate_model 함수를 수정하여 SNR 테스트 없이 기본 평가만 수행하는 함수 호출
+                from evaluate import evaluate_model_basic
+                results = evaluate_model_basic(model, test_loader, device, config)
+                
+                # 결과 저장 디렉토리 생성
+                os.makedirs("./results", exist_ok=True)
+                
+                # 결과 저장
+                if checkpoint_path:
+                    save_path = f"./results/basic_test_results_{checkpoint_path.split('/')[-1].split('.')[0]}.npy"
+                else:
+                    save_path = f"./results/basic_test_results_initialized_model.npy"
+                
+                np.save(save_path, {
                     env: {
-                        'distance_errors': np.array(v[env]['distance_errors']),
-                        'angle_errors': np.array(v[env]['angle_errors']),
-                        'samples': v[env]['samples']
-                    } for env in v
-                } for k, v in results_by_noise.items()
-            })
-            print(f"\n결과가 {save_path}에 저장되었습니다.")
+                        'distance_errors': np.array(results[env]['distance_errors']),
+                        'angle_errors': np.array(results[env]['angle_errors']),
+                        'samples': results[env]['samples']
+                    } for env in results
+                })
+                
+                # 결과 출력
+                print("\n=== 평가 결과 ===")
+                for env, metrics in results.items():
+                    if metrics['samples'] == 0:
+                        continue
+                        
+                    avg_distance = np.mean(metrics['distance_errors'])
+                    avg_angle = np.mean(metrics['angle_errors'])
+                    
+                    print(f"\n{env}:")
+                    print(f"├─ 샘플 수: {metrics['samples']}")
+                    print(f"├─ 거리 오차: {avg_distance:.3f}m")
+                    print(f"└─ 각도 오차: {avg_angle:.1f}°")
+                
+                print(f"\n결과가 {save_path}에 저장되었습니다.")
             
         except Exception as e:
             print(f"평가 중 오류 발생: {str(e)}")
             raise e
     else:
-        print("사용법: python main.py [train/test] [gpu_number] [checkpoint_path] [model_version]")
+        parser.print_help()

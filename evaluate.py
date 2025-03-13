@@ -63,8 +63,8 @@ def evaluate_model(model, test_loader, device, config):
     
     # Warmup을 위한 더미 추론
     print("\n=== 워밍업 수행중... ===")
-    dummy_input = torch.randn(1, config.microphone_num, config.sample_num, 
-                            device=device)
+    dummy_input = torch.randn(1, config.microphone_num, config.sample_num, 20, 
+                            device=device)  # 4차원 텐서로 생성 (batch, channels, samples, seq_len)
     for _ in range(10):  # 10회 워밍업
         with torch.no_grad():
             model(dummy_input)
@@ -131,7 +131,7 @@ def evaluate_model(model, test_loader, device, config):
                     rot_preds = []
                     
                     for i in range(batch_size):
-                        single_input = inputs[i:i+1]  # 단일 샘플 선택
+                        single_input = inputs[i:i+1]  # 단일 샘플 선택 (이미 4차원 텐서)
                         torch.cuda.synchronize()  # GPU 동기화
                         
                         # 추론 시작 시간 기록
@@ -254,16 +254,12 @@ def print_evaluation_results(results_by_noise, config):
     # Latency 통계 출력
     if 'latency_stats' in results_by_noise:
         stats = results_by_noise.pop('latency_stats')  # latency_stats를 제거하고 나머지 결과만 처리
-        print("\n=== 전체 Latency 통계 ===")
+        print("\n=== Latency 통계 ===")
         print(f"├─ 평균 추론 시간: {stats['avg']:.2f}ms")
-        print(f"├─ 표준 편차: {stats['std']:.2f}ms")
-        print(f"├─ 최소 추론 시간: {stats['min']:.2f}ms")
-        print(f"├─ 최대 추론 시간: {stats['max']:.2f}ms")
-        print(f"├─ 95퍼센타일: {stats['p95']:.2f}ms")
-        print(f"└─ 99퍼센타일: {stats['p99']:.2f}ms")
+        print(f"└─ 표준 편차: {stats['std']:.2f}ms")
     
     for noise_level, results in results_by_noise.items():
-        print(f"\n=== 노이즈 레벨 {noise_level} 결과 ===")
+        print(f"\n=== 테스트 결과 (SNR {noise_level}dB) ===")
         for env, metrics in results.items():
             if metrics['samples'] == 0:
                 continue
@@ -275,27 +271,15 @@ def print_evaluation_results(results_by_noise, config):
             within_dist = sum(d <= target_thresholds['distance'] for d in metrics['distance_errors'])
             within_angle = sum(a <= target_thresholds['angle'] for a in metrics['angle_errors'])
             
-            # 환경별 latency 통계 계산
-            if 'latencies' in metrics and metrics['latencies']:
-                env_latencies = metrics['latencies']
-                avg_latency = np.mean(env_latencies)
-                std_latency = np.std(env_latencies)
-                p95_latency = np.percentile(env_latencies, 95)
-            
             print(f"\n{env}:")
             print(f"├─ 샘플 수: {metrics['samples']}")
             print(f"├─ 거리 오차:")
             print(f"│  ├─ MAE: {avg_distance:.3f}m (논문: {paper_metrics[env]['distance']}m)")
             print(f"│  ├─ RMSE: {rmse_distance:.3f}m")
             print(f"│  └─ 목표 달성률 (<{target_thresholds['distance']}m): {within_dist/metrics['samples']:.2%}")
-            print(f"├─ 각도 오차:")
-            print(f"│  ├─ 평균: {avg_angle:.2f}° (논문: {paper_metrics[env]['angle']}°)")
-            print(f"│  └─ 목표 달성률 (<{target_thresholds['angle']}°): {within_angle/metrics['samples']:.2%}")
-            if 'latencies' in metrics and metrics['latencies']:
-                print(f"└─ Latency:")
-                print(f"   ├─ 평균: {avg_latency:.2f}ms")
-                print(f"   ├─ 표준편차: {std_latency:.2f}ms")
-                print(f"   └─ 95퍼센타일: {p95_latency:.2f}ms")
+            print(f"└─ 각도 오차:")
+            print(f"   ├─ 평균: {avg_angle:.2f}° (논문: {paper_metrics[env]['angle']}°)")
+            print(f"   └─ 목표 달성률 (<{target_thresholds['angle']}°): {within_angle/metrics['samples']:.2%}")
 
 def test_epoch(data_generator, model, criterion, dcase_output_folder, params, device, criterion_tdoa=None):
     test_filelist = data_generator.get_filelist()
@@ -335,3 +319,90 @@ def test_epoch(data_generator, model, criterion, dcase_output_folder, params, de
         test_loss /= nb_test_batches
         print("Average latency: {}ms".format(np.mean(latency_list)), flush=True)
     return test_loss
+
+def evaluate_model_basic(model, test_loader, device, config):
+    """SNR 테스트 없이 기본 모델 평가 함수"""
+    model.eval()
+    
+    env_metrics = {
+        'same_user_same_space': {
+            'distance_errors': [],
+            'angle_errors': [],
+            'loss': 0,
+            'samples': 0,
+            'latencies': []
+        },
+        'diff_user_same_space': {
+            'distance_errors': [],
+            'angle_errors': [],
+            'loss': 0,
+            'samples': 0,
+            'latencies': []
+        },
+        'diff_user_diff_space': {
+            'distance_errors': [],
+            'angle_errors': [],
+            'loss': 0,
+            'samples': 0,
+            'latencies': []
+        }
+    }
+    
+    test_loader_tqdm = tqdm(enumerate(test_loader), 
+                           desc='기본 평가', 
+                           total=len(test_loader), 
+                           unit='batch')
+    
+    with torch.no_grad():
+        with torch.amp.autocast('cuda', enabled=config.use_amp):
+            for batch_idx, (inputs, (pos_target, rot_target)) in test_loader_tqdm:
+                batch_size = inputs.size(0)
+                
+                # 데이터를 디바이스로 이동
+                inputs = inputs.to(device)
+                pos_target = pos_target.to(device)
+                rot_target = rot_target.to(device)
+                
+                # 모델 추론
+                pos_pred, rot_pred = model(inputs)
+                
+                # 세션 ID 가져오기
+                batch_session_ids = test_loader.dataset.get_session_ids(batch_idx, batch_size)
+                
+                # 각 샘플별로 환경 분류하여 메트릭 계산
+                for i in range(batch_size):
+                    sess_id = batch_session_ids[i]
+                    
+                    # 환경 확인
+                    if sess_id in test_loader.dataset.environment_sessions['same_user_same_space']:
+                        env = 'same_user_same_space'
+                    elif sess_id in test_loader.dataset.environment_sessions['diff_user_same_space']:
+                        env = 'diff_user_same_space'
+                    else:
+                        env = 'diff_user_diff_space'
+                    
+                    # 개별 샘플의 오차 계산
+                    distance_error = torch.norm(pos_pred[i] - pos_target[i]).item()
+                    
+                    # 각도 오차
+                    rot_pred_i = F.normalize(rot_pred[i:i+1], p=2, dim=1)
+                    rot_target_i = F.normalize(rot_target[i:i+1], p=2, dim=1)
+                    angle_error = quaternion_angle_difference(rot_pred_i, rot_target_i).item()
+                    
+                    # 환경별 메트릭 저장
+                    env_metrics[env]['distance_errors'].append(distance_error)
+                    env_metrics[env]['angle_errors'].append(angle_error)
+                    env_metrics[env]['samples'] += 1
+                
+                # 진행 바 업데이트
+                mean_dist = np.mean([err for env in env_metrics.values() 
+                                  for err in env['distance_errors']])
+                mean_ang = np.mean([err for env in env_metrics.values() 
+                                 for err in env['angle_errors']])
+                
+                test_loader_tqdm.set_postfix(
+                    mae=f"{mean_dist:.3f}m",
+                    angle=f"{mean_ang:.2f}°"
+                )
+    
+    return env_metrics

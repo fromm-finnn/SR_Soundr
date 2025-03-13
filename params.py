@@ -12,7 +12,6 @@ class TrainingConfig:
     output_num: int = 7  #위치(3) + 쿼터니언(4)
     
     # 데이터셋 설정
-    # val_size: int = 13288  # 최대 검증 데이터 크기
     
     # 데이터 분할 설정
     train_ratio: float = 0.7  # 학습용 세션 비율
@@ -43,7 +42,7 @@ class TrainingConfig:
     pin_memory: bool = True
     
     # 학습 하이퍼파라미터
-    learning_rate: float = 5e-5 # 5e-5 
+    learning_rate: float = 5e-5 
     weight_decay: float = 1e-4
     num_epochs: int = 200
     
@@ -165,7 +164,18 @@ class TrainingConfig:
             
             # 실험 이름이 없으면 자동 생성
             if self.experiment_name is None:
-                self.experiment_name = ("dov_soundr_4ch(0,4,8,12)_audionet_v3")
+                # 마이크 채널 수와 선택된 채널에 따라 동적으로 이름 생성
+                if hasattr(self, 'selected_channels') and self.selected_channels is not None:
+                    # 선택된 채널이 있는 경우
+                    channels_str = ','.join(map(str, self.selected_channels))
+                    self.experiment_name = f"dov_soundr_{self.microphone_num}ch({channels_str})_audionet_v3"
+                elif hasattr(self, 'optimize_for_two_channel') and self.optimize_for_two_channel and hasattr(self, 'two_channel_indices'):
+                    # 2채널 최적화 모드인 경우
+                    channels_str = ','.join(map(str, self.two_channel_indices))
+                    self.experiment_name = f"dov_soundr_2ch({channels_str})_audionet_v3_optimized"
+                else:
+                    # 기본 4채널 설정
+                    self.experiment_name = "dov_soundr_4ch(0,4,8,12)_audionet_v3"
         
         # 데이터 분할 비율 검증
         total_ratio = self.train_ratio + self.val_ratio + self.test_ratio

@@ -13,7 +13,7 @@ import time
 import seaborn as sns
 import torch.nn.functional as F
 import kornia
-from network import AudioNet, AudioNetV3  # AudioNetV3 추가
+from network import AudioNetV3  
 
 eps = 1e-6
 
@@ -26,9 +26,8 @@ class AudioTrainer:
         self.config = config
         self.max_epochs = config.num_epochs
         
-        # 모델 타입 확인
-        self.is_v3_model = isinstance(model, AudioNetV3)
-        print(f"모델 타입: {'AudioNetV3' if self.is_v3_model else 'AudioNet'}")
+        # AudioNetV3 모델 사용
+        print("AudioNetV3 모델 사용")
 
         # Mixed Precision 설정
         self.scaler = torch.amp.GradScaler(
@@ -540,7 +539,7 @@ class AudioTrainer:
                     )
 
                 # 환경별 결과 출력
-                print("\n=== 환경별 검증 결과 ===")
+                print("\n=== 검증 결과 ===")
                 for env, metrics in env_metrics.items():
                     if metrics['samples'] == 0:
                         continue
@@ -562,25 +561,15 @@ class AudioTrainer:
                     print(f"├─ 거리 오차: {avg_distance:.3f}m (논문: {self.paper_metrics[env]['distance']}m)")
                     print(f"├─ 각도 오차: {avg_angle:.1f}° (논문: {self.paper_metrics[env]['angle']}°)")
                     print(f"├─ 목표 거리 달성률: {within_dist/metrics['samples']:.2%}")
-                    print(f"├─ 목표 각도 달성률: {within_angle/metrics['samples']:.2%}")
-                    print(f"├─ 평균 latency: {avg_latency:.2f}ms")
-                    print(f"└─ Latency 표준편차: {std_latency:.2f}ms")
+                    print(f"└─ 목표 각도 달성률: {within_angle/metrics['samples']:.2%}")
 
                 # 전체 latency 통계 계산
                 avg_latency = np.mean(latencies)
                 std_latency = np.std(latencies)
-                min_latency = np.min(latencies)
-                max_latency = np.max(latencies)
-                p95_latency = np.percentile(latencies, 95)
-                p99_latency = np.percentile(latencies, 99)
 
-                print("\n=== 전체 Latency 통계 ===")
+                print("\n=== Latency 통계 ===")
                 print(f"├─ 평균 추론 시간: {avg_latency:.2f}ms")
-                print(f"├─ 표준 편차: {std_latency:.2f}ms")
-                print(f"├─ 최소 추론 시간: {min_latency:.2f}ms")
-                print(f"├─ 최대 추론 시간: {max_latency:.2f}ms")
-                print(f"├─ 95퍼센타일: {p95_latency:.2f}ms")
-                print(f"└─ 99퍼센타일: {p99_latency:.2f}ms")
+                print(f"└─ 표준 편차: {std_latency:.2f}ms")
 
                 # 전체 메트릭 계산
                 all_distance_errors = []
@@ -632,11 +621,7 @@ class AudioTrainer:
                                             self.paper_metrics['same_user_same_space']['angle'],
                     'val_latency': {
                         'mean': avg_latency,
-                        'std': std_latency,
-                        'min': min_latency,
-                        'max': max_latency,
-                        'p95': p95_latency,
-                        'p99': p99_latency
+                        'std': std_latency
                     }
                 }
             
@@ -661,7 +646,6 @@ class AudioTrainer:
                 'best_composite_score': self.best_composite_score,
                 'history': self.history,
                 'n_iter': self.n_iter,
-                # 점진적 학습 관련 정보 추가
                 'warmup_epochs': self.warmup_epochs,
                 'rotation_ramp_epochs': self.rotation_ramp_epochs,
                 'current_rotation_weight': self.final_rotation_weight if epoch >= self.warmup_epochs else 0.0
@@ -770,3 +754,43 @@ class AudioTrainer:
             print(f"\n[ERROR] 체크포인트 정리 중 오류 발생: {str(e)}")
             import traceback
             traceback.print_exc()
+
+    def load_checkpoint(self, checkpoint_path):
+        """체크포인트 로드 함수"""
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+            
+            # 모델 가중치 로드
+            self.model.load_state_dict(checkpoint['model_state_dict'])
+            
+            # 옵티마이저 상태 로드
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            
+            # 스케줄러 상태 로드
+            if checkpoint['scheduler_state_dict']:
+                self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            
+            # 스케일러 상태 로드
+            self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
+            
+            # 최고 성능 지표 로드
+            self.best_angle_acc = checkpoint['best_angle_acc']
+            self.best_composite_score = checkpoint['best_composite_score']
+            
+            # 히스토리 로드
+            self.history = checkpoint['history']
+            
+            # 반복 횟수 로드
+            self.n_iter = checkpoint['n_iter']
+            
+            # 시작 에포크 설정
+            self.start_epoch = checkpoint['epoch'] + 1
+            
+            print(f"체크포인트 로딩 완료 (에포크 {self.start_epoch}부터 시작)")
+            return True
+            
+        except Exception as e:
+            print(f"체크포인트 로드 중 오류 발생: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return False
