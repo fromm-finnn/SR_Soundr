@@ -1,6 +1,6 @@
 import os
 from dataclasses import dataclass, field
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 import torch 
 import numpy as np
 
@@ -11,7 +11,8 @@ class TrainingConfig:
     microphone_num: int = 4 #16 4 2
     output_num: int = 7  #위치(3) + 쿼터니언(4)
     
-    # 데이터셋 설정
+    # 채널 선택 설정
+    selected_channels: Optional[List[int]] = None  # 명령줄에서 지정된 채널
     
     # 데이터 분할 설정
     train_ratio: float = 0.7  # 학습용 세션 비율
@@ -90,13 +91,38 @@ class TrainingConfig:
     angle_aug_prob: float = 0.5    # 각도 증강을 적용할 확률
     max_angle_offset: float = 30.0 # 최대 각도 변화 (도)
 
-    # 마이크 배열 설정 (각도 증강에 필요)
-    mic_positions: list = field(default_factory=lambda: [
-        [0, 0, 0],      # 첫 번째 마이크 (기준점) - 0번 채널
-        [0, 0.05, 0],   # 두 번째 마이크 - 4번 채널
-        [0, 0.1, 0],    # 세 번째 마이크 - 8번 채널
-        [0, 0.15, 0]    # 네 번째 마이크 - 12번 채널
+    # UMA-16 마이크 배열의 모든 채널(0-15)에 대한 물리적 위치 정의
+    # 인접한 마이크 간 거리는 42mm (0.042m)
+    # 기준점(0,0,0)을 중심으로 상대적 위치 설정
+    all_mic_positions: list = field(default_factory=lambda: [
+        # 채널 0-3 (첫 번째 행)
+        [0, -0.126, 0],    # 채널 0 (M1): 행 4, 열 2
+        [0.042, -0.126, 0], # 채널 1 (M2): 행 4, 열 3
+        [0, -0.084, 0],    # 채널 2 (M3): 행 3, 열 2
+        [0.042, -0.084, 0], # 채널 3 (M4): 행 3, 열 3
+        
+        # 채널 4-7 (두 번째 행)
+        [0, 0.042, 0],     # 채널 4 (M5): 행 2, 열 2
+        [0.042, 0.042, 0],  # 채널 5 (M6): 행 2, 열 3
+        [0, 0.084, 0],     # 채널 6 (M7): 행 1, 열 2
+        [0.042, 0.084, 0],  # 채널 7 (M8): 행 1, 열 3
+        
+        # 채널 8-11 (세 번째 행)
+        [0.126, 0.126, 0],  # 채널 8 (M9): 행 1, 열 4
+        [0.084, 0.126, 0],  # 채널 9 (M10): 행 1, 열 3
+        [0.126, 0.084, 0],  # 채널 10 (M11): 행 2, 열 4
+        [0.084, 0.084, 0],  # 채널 11 (M12): 행 2, 열 3
+        
+        # 채널 12-15 (네 번째 행)
+        [0.126, -0.042, 0],  # 채널 12 (M13): 행 3, 열 4
+        [0.084, -0.042, 0],  # 채널 13 (M14): 행 3, 열 3
+        [0.126, -0.084, 0],  # 채널 14 (M15): 행 4, 열 4
+        [0.084, -0.084, 0]   # 채널 15 (M16): 행 4, 열 3
     ])
+    
+    # 선택된 채널에 대한 마이크 위치 (자동으로 계산됨)
+    mic_positions: list = field(default_factory=list)
+    
     speed_of_sound: float = 343.0  # 음속 (m/s)
     sample_rate: int = 48000       # 샘플링 레이트 (Hz)
 
@@ -152,6 +178,9 @@ class TrainingConfig:
 
     def __post_init__(self):
         """초기화 후 처리"""
+        # 선택된 채널에 따라 마이크 위치 설정
+        self._update_mic_positions()
+        
         if torch.cuda.is_available():
             # 기존 디렉토리 생성
             os.makedirs(self.checkpoint_dir, exist_ok=True)
@@ -181,6 +210,66 @@ class TrainingConfig:
         total_ratio = self.train_ratio + self.val_ratio + self.test_ratio
         if not abs(total_ratio - 1.0) < 1e-6:
             raise ValueError(f"분할 비율의 합이 1이 되어야 합니다. (현재: {total_ratio})")
+    
+    def _update_mic_positions(self):
+        """선택된 채널에 따라 마이크 위치 업데이트"""
+        # 선택된 채널이 있는 경우
+        if self.selected_channels is not None:
+            self.mic_positions = [self.all_mic_positions[ch] for ch in self.selected_channels]
+        # 2채널 최적화 모드인 경우
+        elif self.optimize_for_two_channel and hasattr(self, 'two_channel_indices'):
+            self.mic_positions = [self.all_mic_positions[ch] for ch in self.two_channel_indices]
+        # 기본 4채널 설정
+        else:
+            default_channels = [0, 4, 8, 12]
+            self.mic_positions = [self.all_mic_positions[ch] for ch in default_channels]
+        
+        print(f"마이크 위치 설정 완료: {len(self.mic_positions)}개 채널")
+        for i, pos in enumerate(self.mic_positions):
+            print(f"  채널 {i}: 위치 {pos}")
+        
+        # UMA-16 레이아웃 격자 시각화
+        self._visualize_mic_grid()
+    
+    def _visualize_mic_grid(self):
+        """UMA-16 마이크 배열을 격자 형태로 시각화"""
+        # UMA-16 레이아웃 정의 (1-based 인덱스)
+        uma16_layout = [
+            [8, 7, 10, 9],    # 첫 번째 행 (위)
+            [6, 5, 12, 11],   # 두 번째 행
+            [4, 3, 14, 13],   # 세 번째 행
+            [2, 1, 16, 15]    # 네 번째 행 (아래)
+        ]
+        
+        # 0-based 인덱스로 변환
+        uma16_layout_0based = [[mic-1 for mic in row] for row in uma16_layout]
+        
+        # 선택된 채널 (0-based)
+        selected_channels = self.selected_channels if self.selected_channels is not None else \
+                           list(self.two_channel_indices) if self.optimize_for_two_channel else [0, 4, 8, 12]
+        
+        print("\nUMA-16 마이크 배열 레이아웃:")
+        print("┌───┬───┬───┬───┐")
+        
+        for i, row in enumerate(uma16_layout_0based):
+            line = "│"
+            for j, mic_idx in enumerate(row):
+                # 선택된 채널이면 'X'로 표시, 아니면 '·'로 표시
+                if mic_idx in selected_channels:
+                    marker = f"{mic_idx:2d}"
+                else:
+                    marker = "··"
+                line += f" {marker} │"
+            print(line)
+            
+            # 마지막 행이 아니면 구분선 추가
+            if i < 3:
+                print("├───┼───┼───┼───┤")
+            else:
+                print("└───┴───┴───┴───┘")
+        
+        print("\n범례: 숫자 = 선택된 채널 인덱스, ·· = 선택되지 않은 채널")
+        print("위치: 위쪽 = 앞, 아래쪽 = 뒤, 왼쪽 = 왼쪽, 오른쪽 = 오른쪽")
 
     def get_optimizer_params(self):
         """옵티마이저 파라미터 반환"""
