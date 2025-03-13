@@ -554,14 +554,24 @@ class AudioTrainer:
                                     for d in metrics['distance_errors'])
                     within_angle = sum(a <= self.target_thresholds['angle'] 
                                     for a in metrics['angle_errors'])
-                        
-                    print(f"\n{env}:")
-                    print(f"├─ 샘플 수: {metrics['samples']}")
-                    print(f"├─ 평균 손실: {avg_loss:.4f}")
-                    print(f"├─ 거리 오차: {avg_distance:.3f}m (논문: {self.paper_metrics[env]['distance']}m)")
-                    print(f"├─ 각도 오차: {avg_angle:.1f}° (논문: {self.paper_metrics[env]['angle']}°)")
-                    print(f"├─ 목표 거리 달성률: {within_dist/metrics['samples']:.2%}")
-                    print(f"└─ 목표 각도 달성률: {within_angle/metrics['samples']:.2%}")
+                    
+                    # 환경별 결과 출력 형식 변경
+                    print(f"\n[Validation Results - {env}]")
+                    print(f"├─ Loss: {avg_loss:.4f}")
+                    
+                    print("\n1. Distance Metrics")
+                    print(f"├─ Error Measurements")
+                    print(f"│  ├─ MAE: {avg_distance:.4f}m (Paper: {self.paper_metrics[env]['distance']}m)")
+                    print(f"│  └─ Error Ratio: {(avg_distance/self.paper_metrics[env]['distance']):.2%} of paper")
+                    print(f"└─ Target Achievement")
+                    print(f"   └─ Success Rate (<{self.target_thresholds['distance']}m): {within_dist/metrics['samples']:.2%}")
+                    
+                    print("\n2. Angle Metrics")
+                    print(f"├─ Error Measurements")
+                    print(f"│  ├─ Mean Error: {avg_angle:.2f}° (Paper: {self.paper_metrics[env]['angle']}°)")
+                    print(f"│  └─ Error Ratio: {(avg_angle/self.paper_metrics[env]['angle']):.2%} of paper")
+                    print(f"└─ Target Achievement")
+                    print(f"   └─ Success Rate (<{self.target_thresholds['angle']}°): {within_angle/metrics['samples']:.2%}")
 
                 # 전체 latency 통계 계산
                 avg_latency = np.mean(latencies)
