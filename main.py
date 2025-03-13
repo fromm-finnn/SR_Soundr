@@ -169,6 +169,10 @@ if __name__ == "__main__":
     parser.add_argument('--run_snr_test', action='store_true',
                         help='SNR 테스트 실행 여부 (기본값: False)')
     
+    # 검증 관련 인자
+    parser.add_argument('--measure_latency', action='store_true',
+                        help='검증 시 latency 측정 여부 (기본값: False)')
+    
     # 체크포인트 관련 인자 
     parser.add_argument('--experiment_name', type=str, default=None,
                         help='실험 이름 (체크포인트 저장 폴더명, 기본값: 자동 생성)')
@@ -213,6 +217,10 @@ if __name__ == "__main__":
     if args.learning_rate is not None:
         config.learning_rate = args.learning_rate
     print(f"학습률 설정: {config.learning_rate}")
+    
+    # latency 측정 여부 설정
+    config.measure_latency = args.measure_latency
+    print(f"Latency 측정 여부: {config.measure_latency}")
     
     # 실험 이름 설정 (체크포인트 저장 폴더명)
     if args.experiment_name:

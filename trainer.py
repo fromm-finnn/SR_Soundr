@@ -462,31 +462,43 @@ class AudioTrainer:
                     
                     batch_latencies = []  # 배치 내 각 샘플의 latency 저장
                     
-                    # 각 샘플별로 개별 추론 및 latency 측정
-                    for i in range(batch_size):
-                        single_input = inputs[i:i+1]  # 단일 샘플 선택 (이미 4차원 텐서)
-                        torch.cuda.synchronize()  # GPU 동기화
+                    # latency 측정 여부에 따라 다른 방식으로 처리
+                    if hasattr(self.config, 'measure_latency') and self.config.measure_latency:
+                        # 각 샘플별로 개별 추론 및 latency 측정
+                        pos_pred_list = []
+                        rot_pred_list = []
+                        
+                        for i in range(batch_size):
+                            single_input = inputs[i:i+1]  # 단일 샘플 선택
+                            torch.cuda.synchronize()  # GPU 동기화
+                            start_time = time.time()
+                            
+                            # 단일 샘플 추론
+                            single_pos_pred, single_rot_pred = self.model(single_input)
+                            
+                            torch.cuda.synchronize()  # GPU 동기화
+                            end_time = time.time()
+                            
+                            # Latency 계산 (밀리초 단위)
+                            latency = (end_time - start_time) * 1000
+                            batch_latencies.append(latency)
+                            
+                            # 결과 저장
+                            pos_pred_list.append(single_pos_pred)
+                            rot_pred_list.append(single_rot_pred)
+                        
+                        # 결과 텐서로 변환
+                        pos_pred = torch.cat(pos_pred_list, dim=0)
+                        rot_pred = torch.cat(rot_pred_list, dim=0)
+                    else:
+                        # 배치 전체를 한 번에 처리 (빠른 방식)
                         start_time = time.time()
-                        
-                        # 단일 샘플 추론
-                        single_pos_pred, single_rot_pred = self.model(single_input)
-                        
-                        torch.cuda.synchronize()  # GPU 동기화
+                        pos_pred, rot_pred = self.model(inputs)
                         end_time = time.time()
                         
-                        # Latency 계산 (밀리초 단위)
-                        latency = (end_time - start_time) * 1000
-                        batch_latencies.append(latency)
-                        
-                        if i == 0:  # 배치의 첫 번째 샘플로 전체 예측 텐서 초기화
-                            pos_pred = torch.zeros(batch_size, single_pos_pred.size(1), 
-                                                device=self.device)
-                            rot_pred = torch.zeros(batch_size, single_rot_pred.size(1), 
-                                                device=self.device)
-                        
-                        # 예측 결과 저장
-                        pos_pred[i] = single_pos_pred.squeeze(0)
-                        rot_pred[i] = single_rot_pred.squeeze(0)
+                        # 전체 배치에 대한 평균 latency 계산
+                        avg_batch_latency = (end_time - start_time) * 1000 / batch_size
+                        batch_latencies = [avg_batch_latency] * batch_size
                     
                     # 전체 배치에 대한 평균 latency 계산
                     latencies.extend(batch_latencies)
@@ -555,31 +567,37 @@ class AudioTrainer:
                     within_angle = sum(a <= self.target_thresholds['angle'] 
                                     for a in metrics['angle_errors'])
                     
-                    # 환경별 결과 출력 형식 변경
-                    print(f"\n[Validation Results - {env}]")
-                    print(f"├─ Loss: {avg_loss:.4f}")
-                    
-                    print("\n1. Distance Metrics")
-                    print(f"├─ Error Measurements")
-                    print(f"│  ├─ MAE: {avg_distance:.4f}m (Paper: {self.paper_metrics[env]['distance']}m)")
-                    print(f"│  └─ Error Ratio: {(avg_distance/self.paper_metrics[env]['distance']):.2%} of paper")
-                    print(f"└─ Target Achievement")
-                    print(f"   └─ Success Rate (<{self.target_thresholds['distance']}m): {within_dist/metrics['samples']:.2%}")
-                    
-                    print("\n2. Angle Metrics")
-                    print(f"├─ Error Measurements")
-                    print(f"│  ├─ Mean Error: {avg_angle:.2f}° (Paper: {self.paper_metrics[env]['angle']}°)")
-                    print(f"│  └─ Error Ratio: {(avg_angle/self.paper_metrics[env]['angle']):.2%} of paper")
-                    print(f"└─ Target Achievement")
-                    print(f"   └─ Success Rate (<{self.target_thresholds['angle']}°): {within_angle/metrics['samples']:.2%}")
+                    # 환경별 결과 출력 형식 변경 - 환경 이름 제거
+                    if env == 'same_user_same_space':  # 첫 번째 환경만 출력
+                        print(f"\n[Validation Results]")
+                        print(f"├─ Loss: {avg_loss:.4f}")
+                        
+                        print("\n1. Distance Metrics")
+                        print(f"├─ Error Measurements")
+                        print(f"│  ├─ MAE: {avg_distance:.4f}m (Paper: {self.paper_metrics[env]['distance']}m)")
+                        print(f"│  └─ Error Ratio: {(avg_distance/self.paper_metrics[env]['distance']):.2%} of paper")
+                        print(f"└─ Target Achievement")
+                        print(f"   └─ Success Rate (<{self.target_thresholds['distance']}m): {within_dist/metrics['samples']:.2%}")
+                        
+                        print("\n2. Angle Metrics")
+                        print(f"├─ Error Measurements")
+                        print(f"│  ├─ Mean Error: {avg_angle:.2f}° (Paper: {self.paper_metrics[env]['angle']}°)")
+                        print(f"│  └─ Error Ratio: {(avg_angle/self.paper_metrics[env]['angle']):.2%} of paper")
+                        print(f"└─ Target Achievement")
+                        print(f"   └─ Success Rate (<{self.target_thresholds['angle']}°): {within_angle/metrics['samples']:.2%}")
+                        
+                        # 첫 번째 환경 이후에는 출력하지 않음
+                        break
 
                 # 전체 latency 통계 계산
                 avg_latency = np.mean(latencies)
                 std_latency = np.std(latencies)
 
-                print("\n=== Latency 통계 ===")
-                print(f"├─ 평균 추론 시간: {avg_latency:.2f}ms")
-                print(f"└─ 표준 편차: {std_latency:.2f}ms")
+                # latency 측정 모드일 때만 출력
+                if hasattr(self.config, 'measure_latency') and self.config.measure_latency:
+                    print("\n=== Latency 통계 ===")
+                    print(f"├─ 평균 추론 시간: {avg_latency:.2f}ms")
+                    print(f"└─ 표준 편차: {std_latency:.2f}ms")
 
                 # 전체 메트릭 계산
                 all_distance_errors = []
