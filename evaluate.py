@@ -254,12 +254,12 @@ def print_evaluation_results(results_by_noise, config):
     # Latency 통계 출력
     if 'latency_stats' in results_by_noise:
         stats = results_by_noise.pop('latency_stats')  # latency_stats를 제거하고 나머지 결과만 처리
-        print("\n=== Latency 통계 ===")
-        print(f"├─ 평균 추론 시간: {stats['avg']:.2f}ms")
-        print(f"└─ 표준 편차: {stats['std']:.2f}ms")
+        print("\n=== Latency Statistics ===")
+        print(f"├─ Average Inference Time: {stats['avg']:.2f}ms")
+        print(f"└─ Standard Deviation: {stats['std']:.2f}ms")
     
     for noise_level, results in results_by_noise.items():
-        print(f"\n=== 테스트 결과 (SNR {noise_level}dB) ===")
+        print(f"\n=== Test Results (SNR {noise_level}dB) ===")
         for env, metrics in results.items():
             if metrics['samples'] == 0:
                 continue
@@ -271,15 +271,25 @@ def print_evaluation_results(results_by_noise, config):
             within_dist = sum(d <= target_thresholds['distance'] for d in metrics['distance_errors'])
             within_angle = sum(a <= target_thresholds['angle'] for a in metrics['angle_errors'])
             
-            print(f"\n{env}:")
-            print(f"├─ 샘플 수: {metrics['samples']}")
-            print(f"├─ 거리 오차:")
-            print(f"│  ├─ MAE: {avg_distance:.3f}m (논문: {paper_metrics[env]['distance']}m)")
-            print(f"│  ├─ RMSE: {rmse_distance:.3f}m")
-            print(f"│  └─ 목표 달성률 (<{target_thresholds['distance']}m): {within_dist/metrics['samples']:.2%}")
-            print(f"└─ 각도 오차:")
-            print(f"   ├─ 평균: {avg_angle:.2f}° (논문: {paper_metrics[env]['angle']}°)")
-            print(f"   └─ 목표 달성률 (<{target_thresholds['angle']}°): {within_angle/metrics['samples']:.2%}")
+            # 영어로 통일된 출력 형식 (training 결과와 동일하게)
+            print("\n[Test Results]")
+            
+            print("\n1. Distance Metrics")
+            print(f"├─ Error Measurements")
+            print(f"│  ├─ MAE: {avg_distance:.4f}m (Paper: {paper_metrics[env]['distance']}m)")
+            print(f"│  └─ RMSE: {rmse_distance:.4f}m")
+            print(f"└─ Target Achievement")
+            print(f"   └─ Success Rate (<{target_thresholds['distance']}m): {within_dist/metrics['samples']:.2%}")
+            
+            print("\n2. Angle Metrics")
+            print(f"├─ Error Measurements")
+            print(f"│  ├─ Mean Error: {avg_angle:.2f}° (Paper: {paper_metrics[env]['angle']}°)")
+            print(f"│  └─ Error Ratio: {(avg_angle/paper_metrics[env]['angle'])*100:.2f}% of paper")
+            print(f"└─ Target Achievement")
+            print(f"   └─ Success Rate (<{target_thresholds['angle']}°): {within_angle/metrics['samples']:.2%}")
+            
+            # 한 환경에 대해서만 출력하고 종료 (일반적으로 same_user_same_space만 사용)
+            break
 
 def test_epoch(data_generator, model, criterion, dcase_output_folder, params, device, criterion_tdoa=None):
     test_filelist = data_generator.get_filelist()
