@@ -4,22 +4,42 @@ SoundR-DL은 마이크 배열을 통해 수집된 오디오 데이터를 분석�
 
 ## 데이터 준비
 
-1. 데이터 다운로드:
-```bash
-# soundr-dataset 디렉토리로 이동
-cd soundr-dataset
+### 1. Stanford Soundr 데이터셋 다운로드
 
-# 데이터 다운로드 스크립트 실행
+먼저 Stanford Soundr 데이터셋 저장소를 클론합니다:
+```bash
+# Stanford Soundr 데이터셋 저장소 클론
+git clone https://github.com/stanford-soundr/soundr-dataset.git
+cd soundr-dataset
+```
+
+데이터 다운로드 스크립트를 실행합니다:
+```bash
+# 데이터 다운로드 스크립트 실행 (약 125GB 필요)
 bash download.sh
 ```
 
-2. 데이터 전처리:
+> **참고**: 원본 데이터셋은 Stanford Library에서 호스팅되며, 약 125GB의 저장 공간이 필요합니다.
+
+### 2. 데이터 전처리
+
+필요한 패키지를 설치하고 전처리 스크립트를 실행합니다:
 ```bash
-# 전처리 스크립트 실행
-python preprocess.py
+# 필요한 패키지 설치
+python3 -m pip install -r requirements.txt
+
+# 데이터 전처리 실행
+python3 ./preprocess.py {다운로드된 데이터 폴더} --output {출력 폴더}
 ```
 
-3. 전처리된 데이터 이동:
+전처리 과정을 통해 다음 파일들이 생성됩니다:
+- `input.npy`: 다중 채널 오디오 데이터 (세그먼트 수, 오디오 채널(16), 세그먼트 길이)
+- `output.npy`: 헤드셋 트래킹 데이터 (세그먼트 수, 트래킹 데이터(x, y, z, q_x, q_y, q_z, q_w, vad))
+- `starts.npy`: 데이터 세션 구성 정보
+
+### 3. 전처리된 데이터 이동
+
+전처리된 데이터 파일을 soundr-dl의 data 디렉토리로 이동합니다:
 ```bash
 # soundr-dl의 data 디렉토리 생성
 mkdir -p ../soundr-dl/data
