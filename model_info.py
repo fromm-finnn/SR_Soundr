@@ -65,7 +65,7 @@ def count_parameters(model):
         "module_params": module_params
     }
 
-def analyze_model(mic_num, mic_array, optimize_two_channel=False):
+def analyze_model(mic_num, mic_array, optimize_two_channel=False, use_depthwise_separable=True, depthwise_for_all_blocks=False):
     """지정된 설정으로 모델을 분석합니다."""
     # 설정 로드
     config = TrainingConfig()
@@ -81,8 +81,8 @@ def analyze_model(mic_num, mic_array, optimize_two_channel=False):
         config.optimize_for_two_channel = False
     
     # 경량화 설정 추가
-    config.use_depthwise_separable = True  # Depthwise Separable 기본 활성화
-    config.depthwise_for_all_blocks = False  # 기본적으로 마지막 블록만 적용
+    config.use_depthwise_separable = use_depthwise_separable  # 매개변수에서 전달받은 값 사용
+    config.depthwise_for_all_blocks = depthwise_for_all_blocks  # 매개변수에서 전달받은 값 사용
     
     # AudioNetV3 모델 초기화
     model = AudioNetV3(
@@ -204,15 +204,15 @@ def main():
         
         # 4채널 기본 모델
         print("\n=== 4채널 기본 모델 분석 중... ===")
-        models_info["4채널 기본"] = analyze_model(4, [0, 4, 8, 12])
+        models_info["4채널 기본"] = analyze_model(4, [0, 4, 8, 12], False, args.use_depthwise_separable, args.depthwise_for_all_blocks)
         
         # 2채널 기본 모델 (최적화 없음)
         print("\n=== 2채널 기본 모델 분석 중... ===")
-        models_info["2채널 기본"] = analyze_model(2, [0, 8])
+        models_info["2채널 기본"] = analyze_model(2, [0, 8], False, args.use_depthwise_separable, args.depthwise_for_all_blocks)
         
         # 2채널 최적화 모델
         print("\n=== 2채널 최적화 모델 분석 중... ===")
-        models_info["2채널 최적화"] = analyze_model(2, [0, 8], optimize_two_channel=True)
+        models_info["2채널 최적화"] = analyze_model(2, [0, 8], True, args.use_depthwise_separable, args.depthwise_for_all_blocks)
         
         # 모델 비교
         compare_models(models_info)
@@ -264,7 +264,7 @@ def main():
                 print(f"체크포인트 로드 실패: {str(e)}")
         else:
             # 체크포인트 없이 분석
-            analyze_model(args.mic_num, mic_array, args.optimize_two_channel)
+            analyze_model(args.mic_num, mic_array, args.optimize_two_channel, args.use_depthwise_separable, args.depthwise_for_all_blocks)
 
 if __name__ == "__main__":
     main() 
