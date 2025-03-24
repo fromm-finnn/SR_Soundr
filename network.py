@@ -160,6 +160,65 @@ class CNNBlock(nn.Module):
         
         return x
 
+class DepthwiseSeparableCNNBlock(nn.Module):
+    """Depthwise Separable CNN 블록 (Depthwise + Pointwise 컨볼루션)"""
+    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=None, use_attention=True, reduction_ratio=8):
+        super(DepthwiseSeparableCNNBlock, self).__init__()
+        
+        # 패딩이 지정되지 않은 경우 자동 계산
+        if padding is None:
+            padding = kernel_size // 2
+        
+        self.use_attention = use_attention
+        
+        # Depthwise Convolution (각 채널별로 독립적인 컨볼루션 수행)
+        self.depthwise = nn.Conv1d(
+            in_channels, 
+            in_channels, 
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            groups=in_channels,  # 채널별로 독립적인 컨볼루션
+            bias=False
+        )
+        
+        # Pointwise Convolution (1x1 컨볼루션으로 채널 확장)
+        self.pointwise = nn.Conv1d(
+            in_channels,
+            out_channels,
+            kernel_size=1,  # 1x1 컨볼루션
+            stride=1,
+            padding=0,
+            bias=False
+        )
+        
+        # 배치 정규화
+        self.bn = nn.BatchNorm1d(out_channels)
+        
+        # 활성화 함수
+        self.relu = nn.LeakyReLU(inplace=True)
+        
+        # 채널 어텐션 (선택적)
+        if use_attention:
+            self.channel_attention = ChannelAttention(out_channels, reduction_ratio)
+    
+    def forward(self, x):
+        # Depthwise 컨볼루션
+        x = self.depthwise(x)
+        
+        # Pointwise 컨볼루션
+        x = self.pointwise(x)
+        
+        # 배치 정규화 + 활성화 함수
+        x = self.bn(x)
+        x = self.relu(x)
+        
+        # 채널 어텐션 적용 (선택적)
+        if self.use_attention:
+            x = self.channel_attention(x)
+        
+        return x
+
 class AudioNetV3(nn.Module):
     def __init__(self, sample_num=2400, microphone_num=4, output_num=7, config=None):
         super(AudioNetV3, self).__init__()
@@ -203,6 +262,10 @@ class AudioNetV3(nn.Module):
         # 2채널 최적화 설정
         self.optimize_for_two_channel = config.optimize_for_two_channel if config and hasattr(config, 'optimize_for_two_channel') else False
         
+        # 분리형 컨볼루션 사용 여부 (기본값: Block 2에만 적용)
+        self.use_depthwise_separable = config.use_depthwise_separable if config and hasattr(config, 'use_depthwise_separable') else True
+        self.depthwise_for_all_blocks = config.depthwise_for_all_blocks if config and hasattr(config, 'depthwise_for_all_blocks') else False
+        
         # 2채널 최적화가 활성화되어 있고 microphone_num이 2인 경우
         if self.optimize_for_two_channel and microphone_num == 2:
             print("2채널 최적화 모드 활성화")
@@ -237,37 +300,79 @@ class AudioNetV3(nn.Module):
             self.feature_maps = [88, 176, 608]  # 96, 192, 640에서 조정
         
         # CNN 특징 추출기 - 채널 어텐션 통합
-        self.cnn_blocks = nn.ModuleList([
-            # 첫 번째 블록 - stride 증가
-            CNNBlock(
-                microphone_num, 
-                self.feature_maps[0], 
-                kernel_size=self.kernel_sizes['conv1'], 
-                stride=4, 
-                use_attention=True,
-                reduction_ratio=self.channel_attention_reduction_ratio
-            ),
-            
-            # 두 번째 블록 - stride 증가
-            CNNBlock(
-                self.feature_maps[0], 
-                self.feature_maps[1], 
-                kernel_size=self.kernel_sizes['conv2'], 
-                stride=4, 
-                use_attention=True,
-                reduction_ratio=self.channel_attention_reduction_ratio
-            ),
-            
-            # 세 번째 블록 - 마지막 레이어
-            CNNBlock(
-                self.feature_maps[1], 
-                self.feature_maps[2], 
-                kernel_size=self.kernel_sizes['conv3'], 
-                stride=1, 
-                use_attention=True,
-                reduction_ratio=self.channel_attention_reduction_ratio
+        self.cnn_blocks = nn.ModuleList()
+        
+        # 첫 번째 블록 - 일반 컨볼루션 또는 분리형 컨볼루션
+        if self.depthwise_for_all_blocks and self.use_depthwise_separable:
+            self.cnn_blocks.append(
+                DepthwiseSeparableCNNBlock(
+                    microphone_num, 
+                    self.feature_maps[0], 
+                    kernel_size=self.kernel_sizes['conv1'], 
+                    stride=4, 
+                    use_attention=True,
+                    reduction_ratio=self.channel_attention_reduction_ratio
+                )
             )
-        ])
+        else:
+            self.cnn_blocks.append(
+                CNNBlock(
+                    microphone_num, 
+                    self.feature_maps[0], 
+                    kernel_size=self.kernel_sizes['conv1'], 
+                    stride=4, 
+                    use_attention=True,
+                    reduction_ratio=self.channel_attention_reduction_ratio
+                )
+            )
+        
+        # 두 번째 블록 - 일반 컨볼루션 또는 분리형 컨볼루션
+        if self.depthwise_for_all_blocks and self.use_depthwise_separable:
+            self.cnn_blocks.append(
+                DepthwiseSeparableCNNBlock(
+                    self.feature_maps[0], 
+                    self.feature_maps[1], 
+                    kernel_size=self.kernel_sizes['conv2'], 
+                    stride=4, 
+                    use_attention=True,
+                    reduction_ratio=self.channel_attention_reduction_ratio
+                )
+            )
+        else:
+            self.cnn_blocks.append(
+                CNNBlock(
+                    self.feature_maps[0], 
+                    self.feature_maps[1], 
+                    kernel_size=self.kernel_sizes['conv2'], 
+                    stride=4, 
+                    use_attention=True,
+                    reduction_ratio=self.channel_attention_reduction_ratio
+                )
+            )
+        
+        # 세 번째 블록 - 분리형 컨볼루션 (Block 2에는 항상 적용)
+        if self.use_depthwise_separable:
+            self.cnn_blocks.append(
+                DepthwiseSeparableCNNBlock(
+                    self.feature_maps[1], 
+                    self.feature_maps[2], 
+                    kernel_size=self.kernel_sizes['conv3'], 
+                    stride=1, 
+                    use_attention=True,
+                    reduction_ratio=self.channel_attention_reduction_ratio
+                )
+            )
+        else:
+            self.cnn_blocks.append(
+                CNNBlock(
+                    self.feature_maps[1], 
+                    self.feature_maps[2], 
+                    kernel_size=self.kernel_sizes['conv3'], 
+                    stride=1, 
+                    use_attention=True,
+                    reduction_ratio=self.channel_attention_reduction_ratio
+                )
+            )
         
         # 적응형 풀링
         self.adaptive_pool = nn.AdaptiveAvgPool1d(1)
@@ -329,6 +434,7 @@ class AudioNetV3(nn.Module):
         print(f"컨텍스트 모듈 사용: {self.use_context_module}")
         print(f"위치-회전 연결 사용: {self.use_position_for_rotation}")
         print(f"2채널 최적화: {self.optimize_for_two_channel}")
+        print(f"분리형 컨볼루션 사용: {self.use_depthwise_separable} (전체 블록: {self.depthwise_for_all_blocks})")
         print("===========================\n")
     
     def _initialize_weights(self):

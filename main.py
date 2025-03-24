@@ -148,6 +148,8 @@ if __name__ == "__main__":
                         help='사용할 GPU 번호 (쉼표로 구분, 기본값: 0)')
     parser.add_argument('--checkpoint', type=str, default=None,
                         help='로드할 체크포인트 경로')
+    parser.add_argument('--resume_training', action='store_true',
+                        help='체크포인트에서 학습 상태까지 복원 (기본값: False)')
     
     # 마이크 및 시퀀스 관련 인자
     parser.add_argument('--mic_num', type=int, default=4,
@@ -177,6 +179,15 @@ if __name__ == "__main__":
     parser.add_argument('--experiment_name', type=str, default=None,
                         help='실험 이름 (체크포인트 저장 폴더명, 기본값: 자동 생성)')
     
+    # 모델 경량화 관련 인자
+    parser.add_argument('--use_depthwise_separable', dest='use_depthwise_separable', action='store_true',
+                        help='Depthwise Separable Convolution 사용 활성화 (기본값: True)')
+    parser.add_argument('--no_depthwise_separable', dest='use_depthwise_separable', action='store_false',
+                        help='Depthwise Separable Convolution 사용 비활성화')
+    parser.add_argument('--depthwise_for_all_blocks', action='store_true',
+                        help='모든 CNN 블록에 분리형 컨볼루션 적용 (기본값: False)')
+    parser.set_defaults(use_depthwise_separable=True)
+    
     args = parser.parse_args()
     
     # 인자 처리
@@ -202,6 +213,11 @@ if __name__ == "__main__":
         print(f"2채널 인덱스: {config.two_channel_indices}")
     else:
         config.optimize_for_two_channel = False
+    
+    # 경량화 관련 설정
+    config.use_depthwise_separable = args.use_depthwise_separable
+    config.depthwise_for_all_blocks = args.depthwise_for_all_blocks
+    print(f"분리형 컨볼루션 사용: {config.use_depthwise_separable} (전체 블록: {config.depthwise_for_all_blocks})")
     
     # 시퀀스 길이 설정
     config.sequence_length = args.sequence_length
@@ -241,22 +257,8 @@ if __name__ == "__main__":
 
     if mode == "train":
         try:
-            # 데이터로더 생성
-            train_loader, val_loader, test_loader = create_dataloaders(config)  
-            print("데이터로더 생성 완료!")
-            
-            # 데이터셋 채널 설정 확인
-            print(f"채널 설정: {train_loader.dataset.selected_channels}")
-            
-            try:
-                # 샘플 데이터 확인
-                sample_input, (sample_pos, sample_rot) = next(iter(train_loader))
-            except Exception as e:
-                print(f"샘플 데이터 확인 중 오류 발생: {str(e)}")
-                import traceback
-                traceback.print_exc()
-            
-            # 모델 초기화 
+            # 모델 초기화 - AudioNetV3 모델 사용
+            print("AudioNetV3 모델 사용")
             model = AudioNetV3(
                 sample_num=config.sample_num,
                 microphone_num=config.microphone_num,
@@ -266,34 +268,62 @@ if __name__ == "__main__":
             
             # 모델을 GPU로 이동
             model = model.to(device)
+            print(f"모델을 {device}로 이동했습니다.")
             
-            try:
-                # Trainer 생성
-                trainer = AudioTrainer(
-                    model=model,
-                    train_loader=train_loader,
-                    val_loader=val_loader,
-                    device=device,
-                    config=config
-                )
-                
-                # 학습 시작
-                trainer.train()
-                
-            except Exception as e:
-                print(f"Trainer 생성 중 오류 발생: {str(e)}")
-                import traceback
-                traceback.print_exc()
-                raise e
-
+            # 데이터로더 생성
+            train_loader, val_loader, test_loader = create_dataloaders(config)
+            print("데이터로더 생성 완료!")
+            
             # 체크포인트 로딩
             if checkpoint_path:
                 try:
-                    checkpoint = torch.load(checkpoint_path, map_location=device)
-                    model.load_state_dict(checkpoint['model_state_dict'])
-                    print(f"체크포인트 로딩 완료: {checkpoint_path}")
+                    if args.resume_training:
+                        print(f"체크포인트에서 학습 상태 전체 복원 시도: {checkpoint_path}")
+                        # Trainer 객체 먼저 생성
+                        trainer = AudioTrainer(model, train_loader, val_loader, device, config)
+                        # trainer의 load_checkpoint 메서드로 전체 학습 상태 복원
+                        success = trainer.load_checkpoint(checkpoint_path)
+                        if success:
+                            print(f"체크포인트에서 학습 상태 복원 완료: {checkpoint_path}")
+                            print(f"에포크 {trainer.start_epoch}부터 학습을 재개합니다.")
+                            # 복원된 에포크부터 시작
+                            trainer.train()
+                        else:
+                            print("학습 상태 복원 실패. 처음부터 학습을 시작합니다.")
+                            trainer = AudioTrainer(model, train_loader, val_loader, device, config)
+                            trainer.train()
+                    else:
+                        # 기존 방식 - 모델 가중치만 로드
+                        print(f"모델 가중치만 로드: {checkpoint_path}")
+                        checkpoint = torch.load(checkpoint_path, map_location=device)
+                        model.load_state_dict(checkpoint['model_state_dict'])
+                        print(f"체크포인트 로딩 완료: {checkpoint_path}")
+                        
+                        # Trainer 초기화 및 학습 시작
+                        try:
+                            trainer = AudioTrainer(model, train_loader, val_loader, device, config)
+                            # 학습 시작
+                            trainer.train()
+                        except Exception as e:
+                            print(f"Trainer 생성 중 오류 발생: {str(e)}")
+                            import traceback
+                            traceback.print_exc()
+                            raise e
                 except Exception as e:
                     print(f"체크포인트 로딩 중 오류 발생: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+            else:
+                # 체크포인트 없이 처음부터 학습
+                try:
+                    trainer = AudioTrainer(model, train_loader, val_loader, device, config)
+                    # 학습 시작
+                    trainer.train()
+                except Exception as e:
+                    print(f"Trainer 생성 중 오류 발생: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+                    raise e
 
         except Exception as e:
             print(f"오류 발생: {str(e)}")

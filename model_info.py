@@ -80,6 +80,10 @@ def analyze_model(mic_num, mic_array, optimize_two_channel=False):
     else:
         config.optimize_for_two_channel = False
     
+    # 경량화 설정 추가
+    config.use_depthwise_separable = True  # Depthwise Separable 기본 활성화
+    config.depthwise_for_all_blocks = False  # 기본적으로 마지막 블록만 적용
+    
     # AudioNetV3 모델 초기화
     model = AudioNetV3(
         sample_num=config.sample_num,
@@ -111,6 +115,7 @@ def analyze_model(mic_num, mic_array, optimize_two_channel=False):
     print(f"Context Module 사용: {model.use_context_module}")
     print(f"Position-Rotation 연결 사용: {model.use_position_for_rotation}")
     print(f"2채널 최적화: {model.optimize_for_two_channel}")
+    print(f"분리형 컨볼루션 사용: {getattr(model, 'use_depthwise_separable', True)} (전체 블록: {getattr(model, 'depthwise_for_all_blocks', False)})")
     
     # FLOPS 계산 (선택적)
     try:
@@ -182,6 +187,11 @@ def main():
     parser.add_argument('--mic_num', type=int, default=4, help='마이크 채널 수 (기본값: 4)')
     parser.add_argument('--mic_array', type=str, default='0,4,8,12', help='마이크 인덱스 (쉼표로 구분)')
     parser.add_argument('--optimize_two_channel', action='store_true', help='2채널 최적화 활성화')
+    parser.add_argument('--checkpoint', type=str, default=None, help='체크포인트 파일 경로 (지정 시 모델 가중치 로드)')
+    parser.add_argument('--use_depthwise_separable', dest='use_depthwise_separable', action='store_true', help='분리형 컨볼루션 사용')
+    parser.add_argument('--no_depthwise_separable', dest='use_depthwise_separable', action='store_false', help='일반 컨볼루션 사용')
+    parser.add_argument('--depthwise_for_all_blocks', action='store_true', help='모든 블록에 분리형 컨볼루션 적용')
+    parser.set_defaults(use_depthwise_separable=True)
     
     args = parser.parse_args()
     
@@ -208,7 +218,53 @@ def main():
         compare_models(models_info)
     else:
         # 단일 모델 분석
-        analyze_model(args.mic_num, mic_array, args.optimize_two_channel)
+        if args.checkpoint:
+            # 체크포인트 있을 경우 로드 후 분석
+            print(f"\n체크포인트를 로드합니다: {args.checkpoint}")
+            try:
+                # 설정 생성
+                config = TrainingConfig()
+                config.microphone_num = args.mic_num
+                config.selected_channels = mic_array
+                config.use_depthwise_separable = args.use_depthwise_separable
+                config.depthwise_for_all_blocks = args.depthwise_for_all_blocks
+                
+                if args.optimize_two_channel and args.mic_num == 2:
+                    config.optimize_for_two_channel = True
+                    config.two_channel_indices = tuple(mic_array)
+                
+                # 모델 초기화
+                model = AudioNetV3(
+                    sample_num=config.sample_num,
+                    microphone_num=config.microphone_num,
+                    output_num=config.output_num,
+                    config=config
+                )
+                
+                # 체크포인트 로드
+                checkpoint = torch.load(args.checkpoint, map_location='cpu')
+                model.load_state_dict(checkpoint['model_state_dict'])
+                print("체크포인트 로드 완료")
+                
+                # 파라미터 분석
+                count_parameters(model)
+                
+                # 결과 출력
+                print(f"\n=== AudioNetV3 모델 정보 요약 ({args.mic_num}채널) ===")
+                print(f"마이크 채널: {mic_array}")
+                print(f"2채널 최적화: {config.optimize_for_two_channel}")
+                print(f"분리형 컨볼루션: {config.use_depthwise_separable} (전체 블록: {config.depthwise_for_all_blocks})")
+                print(f"체크포인트: {args.checkpoint}")
+                print(f"모델 크기: {os.path.getsize(args.checkpoint) / (1024 * 1024):.2f} MB (파일 기준)")
+                
+                # 모델 구조 출력
+                print("\n=== 모델 구조 ===")
+                print(model)
+            except Exception as e:
+                print(f"체크포인트 로드 실패: {str(e)}")
+        else:
+            # 체크포인트 없이 분석
+            analyze_model(args.mic_num, mic_array, args.optimize_two_channel)
 
 if __name__ == "__main__":
     main() 

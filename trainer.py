@@ -215,6 +215,7 @@ class AudioTrainer:
         return loss, pos_loss, quat_loss
     
     def train(self):
+        """학습 함수"""
         # 타임스탬프 디렉토리 설정
         self.timestamp_dir = os.path.join(
             self.config.checkpoint_dir, 
@@ -222,9 +223,13 @@ class AudioTrainer:
         )
         os.makedirs(self.timestamp_dir, exist_ok=True)
         
-        # 시작 에포크 설정 (체크포인트에서 복원된 값 사용)
+        # 학습 시작 에포크 (기본값은 1부터 시작)
         start_epoch = getattr(self, 'start_epoch', 1)
-            
+        
+        # 조기 종료 관련 변수 초기화
+        patience_counter = 0
+        
+        print("\n")
         for epoch in range(start_epoch, self.max_epochs + 1):
             try:
                 # self.model.set_epoch(epoch)  # 현재 epoch 정보 모델에 전달
@@ -234,7 +239,7 @@ class AudioTrainer:
                 print(f"\n{'='*100}")
                 print(f"Epoch {epoch}/{self.max_epochs}".center(100))
                 print('='*100)
-                    
+                
                 self.model.train()
                 running_loss = 0.0
 
@@ -266,14 +271,14 @@ class AudioTrainer:
 
                 for inputs, (pos_target, rot_target) in train_loader_tqdm:
                     batch_size = inputs.size(0)
-                        
+                    
                     # 디바이스로 이동
                     inputs = inputs.to(self.device)
                     pos_target = pos_target.to(self.device)
                     rot_target = rot_target.to(self.device)
-                        
+                    
                     self.optimizer.zero_grad()
-                        
+                    
                     with torch.amp.autocast('cuda', enabled=self.use_amp):
                         pos_pred, rot_pred = self.model(inputs)
                         loss, pos_loss, rot_loss = self.criterion(
@@ -400,6 +405,17 @@ class AudioTrainer:
                     is_best_angle=is_best_angle
                 )
                 
+                # 조기 종료 확인
+                if val_metrics['val_loss'] < self.min_avg_loss:
+                    self.min_avg_loss = val_metrics['val_loss']
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                
+                if patience_counter >= self.config.early_stopping_patience:
+                    print(f"\n[Early Stopping] {self.config.early_stopping_patience}회 연속 성능 향상 없음. 조기 종료 (에폭 {epoch})")
+                    break
+
             except Exception as e:
                 print(f"\n[ERROR] 에포크 {epoch}에서 오류 발생: {str(e)}")
                 import traceback
@@ -664,6 +680,10 @@ class AudioTrainer:
     def save_checkpoint(self, epoch, composite_score=None, val_metrics=None, is_best_composite=False, is_best_angle=False):
         """체크포인트 저장 함수"""
         try:
+            # 디렉토리 존재 확인 및 생성
+            if not os.path.exists(self.timestamp_dir):
+                os.makedirs(self.timestamp_dir, exist_ok=True)
+                
             checkpoint = {
                 'epoch': epoch,
                 'model_state_dict': self.model.state_dict(),
@@ -691,6 +711,9 @@ class AudioTrainer:
                 
             # 최고 복합 점수인 경우
             if is_best_composite:
+                # 이전 best_composite 체크포인트 삭제
+                self._remove_previous_best_checkpoints('composite', epoch)
+                
                 filename = f'{base_filename}_best_composite.pth'
                 save_path = os.path.join(self.timestamp_dir, filename)
                 torch.save(checkpoint, save_path)
@@ -700,6 +723,9 @@ class AudioTrainer:
                     
             # 최고 각도 정확도인 경우
             if is_best_angle:
+                # 이전 best_angle 체크포인트 삭제
+                self._remove_previous_best_checkpoints('angle', epoch)
+                
                 filename = f'{base_filename}_best_angle.pth'
                 save_path = os.path.join(self.timestamp_dir, filename)
                 torch.save(checkpoint, save_path)
@@ -723,6 +749,37 @@ class AudioTrainer:
             import traceback
             traceback.print_exc()
             return False  # 저장 실패를 나타내는 값 반환
+
+    def _remove_previous_best_checkpoints(self, best_type, epoch):
+        """이전 best 체크포인트 삭제 함수"""
+        import glob
+        
+        try:
+            # 현재 에포크의 파일명 생성
+            current_filename = f'model_epoch_{epoch}_best_{best_type}.pth'
+            
+            # 패턴 매칭으로 파일 찾기
+            pattern = os.path.join(self.timestamp_dir, f'*_best_{best_type}.pth')
+            matching_files = glob.glob(pattern)
+            
+            for file_path in matching_files:
+                filename = os.path.basename(file_path)
+                
+                # 현재 에포크의 파일은 건너뛰기
+                if filename == current_filename:
+                    continue
+                
+                # 파일 삭제
+                try:
+                    os.remove(file_path)
+                    print(f"[Cleanup] 이전 best {best_type} 체크포인트 삭제: {filename}")
+                except Exception as e:
+                    print(f"[Cleanup] {filename} 삭제 중 오류 발생: {str(e)}")
+            
+        except Exception as e:
+            print(f"\n[ERROR] 이전 best 체크포인트 삭제 중 오류 발생: {str(e)}")
+            import traceback
+            traceback.print_exc()
 
     def save_metrics(self, epoch, train_metrics, val_metrics):
         """메트릭 저장 함수"""

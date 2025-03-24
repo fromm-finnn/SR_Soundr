@@ -36,7 +36,7 @@ class TrainingConfig:
     angle_error_threshold: float = 30.0    # 각도 오차 허용 임계값 (도)
     
     # 데이터 로더 설정
-    batch_size: int = 512
+    batch_size: int = 128
     num_workers: int = 16
     prefetch_factor: int = 4
     persistent_workers: bool = True
@@ -164,17 +164,21 @@ class TrainingConfig:
     self_attention_dropout: float = 0.1  # 셀프 어텐션의 드롭아웃 비율
     
     # CNN 커널 크기 설정 (V3에서는 더 큰 커널 사용)
-    kernel_sizes: Tuple[int, int, int] = (9, 7, 5)  # conv1, conv2, conv3의 커널 크기
+    kernel_sizes: List[int] = field(default_factory=lambda: [9, 7, 5])  # 각 CNN 블록의 커널 크기
     
     # 컨텍스트 모듈 설정
     use_context_module: bool = True  # 컨텍스트 모듈 사용 여부
     
     # 위치-회전 연결 설정
-    use_position_for_rotation: bool = True  # 회전 예측에 위치 정보 사용 여부
+    use_position_for_rotation: bool = True  # 위치 정보를 회전 예측에 활용할지 여부
     
     # 2채널 최적화 설정
     optimize_for_two_channel: bool = False  # 2채널 최적화 활성화 여부
     two_channel_indices: Tuple[int, int] = (0, 8)  # 2채널 모드에서 사용할 채널 인덱스
+
+    # 경량화 관련 설정
+    use_depthwise_separable: bool = True  # Depthwise Separable Convolution 사용 여부
+    depthwise_for_all_blocks: bool = False  # 모든 CNN 블록에 분리형 컨볼루션 적용 (기본: Block 2에만 적용)
 
     def __post_init__(self):
         """초기화 후 처리"""
@@ -204,7 +208,7 @@ class TrainingConfig:
                     self.experiment_name = f"dov_soundr_2ch({channels_str})_audionet_v3_optimized"
                 else:
                     # 기본 4채널 설정
-                    self.experiment_name = "dov_soundr_4ch(0,4,8,12)_audionet_v3"
+                    self.experiment_name = "v3_1,7,8,14"
         
         # 데이터 분할 비율 검증
         total_ratio = self.train_ratio + self.val_ratio + self.test_ratio
