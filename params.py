@@ -179,6 +179,16 @@ class TrainingConfig:
     # 경량화 관련 설정
     use_depthwise_separable: bool = True  # Depthwise Separable Convolution 사용 여부
     depthwise_for_all_blocks: bool = False  # 모든 CNN 블록에 분리형 컨볼루션 적용 (기본: Block 2에만 적용)
+    
+    # LSTM 경량화 설정
+    use_lightweight_lstm: bool = True  # 경량화된 LSTM 사용 여부
+    lightweight_lstm_hidden_size: int = 384  # 경량 LSTM의 은닉층 크기 (기본값보다 작게 설정)
+    lightweight_lstm_bidirectional: bool = False  # 경량 LSTM의 양방향 설정 (단방향으로 설정하여 파라미터 감소)
+    lightweight_lstm_num_layers: int = 1  # 경량 LSTM의 레이어 수 (작게 설정)
+    
+    # Context Module 경량화 설정
+    use_lightweight_context: bool = True  # 경량화된 Context Module 사용 여부
+    lightweight_context_hidden_size_ratio: float = 0.5  # Context Module LSTM의 은닉층 크기 비율 (입력 크기 대비)
 
     def __post_init__(self):
         """초기화 후 처리"""

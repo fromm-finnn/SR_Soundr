@@ -65,7 +65,7 @@ def count_parameters(model):
         "module_params": module_params
     }
 
-def analyze_model(mic_num, mic_array, optimize_two_channel=False, use_depthwise_separable=True, depthwise_for_all_blocks=False):
+def analyze_model(mic_num, mic_array, optimize_two_channel=False, use_depthwise_separable=True, depthwise_for_all_blocks=False, use_lightweight_lstm=True, lightweight_lstm_hidden_size=384, lightweight_lstm_bidirectional=False, lightweight_lstm_num_layers=1, use_lightweight_context=True, lightweight_context_hidden_size_ratio=0.5):
     """지정된 설정으로 모델을 분석합니다."""
     # 설정 로드
     config = TrainingConfig()
@@ -81,8 +81,18 @@ def analyze_model(mic_num, mic_array, optimize_two_channel=False, use_depthwise_
         config.optimize_for_two_channel = False
     
     # 경량화 설정 추가
-    config.use_depthwise_separable = use_depthwise_separable  # 매개변수에서 전달받은 값 사용
-    config.depthwise_for_all_blocks = depthwise_for_all_blocks  # 매개변수에서 전달받은 값 사용
+    config.use_depthwise_separable = use_depthwise_separable
+    config.depthwise_for_all_blocks = depthwise_for_all_blocks
+    
+    # LSTM 경량화 설정 적용
+    config.use_lightweight_lstm = use_lightweight_lstm
+    config.lightweight_lstm_hidden_size = lightweight_lstm_hidden_size
+    config.lightweight_lstm_bidirectional = lightweight_lstm_bidirectional
+    config.lightweight_lstm_num_layers = lightweight_lstm_num_layers
+    
+    # Context Module 경량화 설정 적용
+    config.use_lightweight_context = use_lightweight_context
+    config.lightweight_context_hidden_size_ratio = lightweight_context_hidden_size_ratio
     
     # AudioNetV3 모델 초기화
     model = AudioNetV3(
@@ -109,25 +119,35 @@ def analyze_model(mic_num, mic_array, optimize_two_channel=False, use_depthwise_
     
     # 모델 설정 정보 출력
     print("\n=== 모델 설정 정보 ===")
-    print(f"Channel Attention Reduction Ratio: {model.channel_attention_reduction_ratio}")
-    print(f"Self Attention Dropout Rate: {model.self_attention_dropout}")
-    print(f"Kernel Sizes: {model.kernel_sizes}")
-    print(f"Context Module 사용: {model.use_context_module}")
-    print(f"Position-Rotation 연결 사용: {model.use_position_for_rotation}")
-    print(f"2채널 최적화: {model.optimize_for_two_channel}")
-    print(f"분리형 컨볼루션 사용: {getattr(model, 'use_depthwise_separable', True)} (전체 블록: {getattr(model, 'depthwise_for_all_blocks', False)})")
+    print(f"Channel Attention Reduction Ratio: {config.channel_attention_reduction_ratio}")
+    print(f"Self Attention Dropout Rate: {config.self_attention_dropout}")
+    print(f"Kernel Sizes: {config.kernel_sizes}")
+    print(f"Context Module 사용: {config.use_context_module}")
+    print(f"Position-Rotation 연결 사용: {config.use_position_for_rotation}")
+    print(f"2채널 최적화: {config.optimize_for_two_channel}")
+    print(f"분리형 컨볼루션 사용: {config.use_depthwise_separable} (전체 블록: {config.depthwise_for_all_blocks})")
     
-    # FLOPS 계산 (선택적)
-    try:
-        from thop import profile
-        # 입력 텐서 형태: (batch_size, channels, samples, seq_len)
-        dummy_input = torch.randn(1, config.microphone_num, config.sample_num, config.sequence_length)
-        with torch.no_grad():
-            flops, _ = profile(model, inputs=(dummy_input,), verbose=False)
-            print(f"\n모델 FLOPS: {flops/1e9:.2f} GFLOPS")
-    except Exception as e:
-        print(f"\nFLOPS 계산 중 오류 발생: {str(e)}")
-        print("FLOPS 계산을 위해 thop 패키지를 설치하세요: pip install thop")
+    # 경량화 정보 출력
+    if config.use_lightweight_lstm or config.use_lightweight_context:
+        print("\n=== 경량화 설정 ===")
+        if config.use_lightweight_lstm:
+            print(f"경량화 LSTM: hidden_size={config.lightweight_lstm_hidden_size}, bidirectional={config.lightweight_lstm_bidirectional}, num_layers={config.lightweight_lstm_num_layers}")
+        if config.use_lightweight_context:
+            print(f"경량화 Context Module: hidden_size_ratio={config.lightweight_context_hidden_size_ratio}")
+    
+    # FLOPS 계산
+    batch_size = 1
+    sequence_length = 20
+    sample_num = 2400
+    input_tensor = torch.randn(batch_size, config.microphone_num, sample_num, sequence_length)
+    
+    import time
+    from thop import profile
+    
+    flops, params = profile(model, inputs=(input_tensor,))
+    
+    # GFLOPS로 변환하여 출력
+    print(f"\n모델 FLOPS: {flops / 1e9:.2f} GFLOPS")
     
     return param_info
 
@@ -191,7 +211,15 @@ def main():
     parser.add_argument('--use_depthwise_separable', dest='use_depthwise_separable', action='store_true', help='분리형 컨볼루션 사용')
     parser.add_argument('--no_depthwise_separable', dest='use_depthwise_separable', action='store_false', help='일반 컨볼루션 사용')
     parser.add_argument('--depthwise_for_all_blocks', action='store_true', help='모든 블록에 분리형 컨볼루션 적용')
-    parser.set_defaults(use_depthwise_separable=True)
+    parser.add_argument('--use_lightweight_lstm', action='store_true', help='경량화 LSTM 사용')
+    parser.add_argument('--lightweight_lstm_hidden_size', type=int, default=384, help='경량화 LSTM hidden_size')
+    parser.add_argument('--lightweight_lstm_bidirectional', action='store_true', help='경량화 LSTM bidirectional')
+    parser.add_argument('--lightweight_lstm_num_layers', type=int, default=1, help='경량화 LSTM num_layers')
+    parser.add_argument('--use_lightweight_context', action='store_true', help='경량화 Context Module 사용')
+    parser.add_argument('--lightweight_context_hidden_size_ratio', type=float, default=0.5, help='경량화 Context Module hidden_size_ratio')
+    parser.add_argument('--no_lightweight_lstm', dest='use_lightweight_lstm', action='store_false', help='경량화 LSTM 비활성화')
+    parser.add_argument('--no_lightweight_context', dest='use_lightweight_context', action='store_false', help='경량화 Context Module 비활성화')
+    parser.set_defaults(use_depthwise_separable=True, use_lightweight_lstm=True, use_lightweight_context=True)
     
     args = parser.parse_args()
     
@@ -204,15 +232,15 @@ def main():
         
         # 4채널 기본 모델
         print("\n=== 4채널 기본 모델 분석 중... ===")
-        models_info["4채널 기본"] = analyze_model(4, [0, 4, 8, 12], False, args.use_depthwise_separable, args.depthwise_for_all_blocks)
+        models_info["4채널 기본"] = analyze_model(4, [0, 4, 8, 12], False, args.use_depthwise_separable, args.depthwise_for_all_blocks, args.use_lightweight_lstm, args.lightweight_lstm_hidden_size, args.lightweight_lstm_bidirectional, args.lightweight_lstm_num_layers, args.use_lightweight_context, args.lightweight_context_hidden_size_ratio)
         
         # 2채널 기본 모델 (최적화 없음)
         print("\n=== 2채널 기본 모델 분석 중... ===")
-        models_info["2채널 기본"] = analyze_model(2, [0, 8], False, args.use_depthwise_separable, args.depthwise_for_all_blocks)
+        models_info["2채널 기본"] = analyze_model(2, [0, 8], False, args.use_depthwise_separable, args.depthwise_for_all_blocks, args.use_lightweight_lstm, args.lightweight_lstm_hidden_size, args.lightweight_lstm_bidirectional, args.lightweight_lstm_num_layers, args.use_lightweight_context, args.lightweight_context_hidden_size_ratio)
         
         # 2채널 최적화 모델
         print("\n=== 2채널 최적화 모델 분석 중... ===")
-        models_info["2채널 최적화"] = analyze_model(2, [0, 8], True, args.use_depthwise_separable, args.depthwise_for_all_blocks)
+        models_info["2채널 최적화"] = analyze_model(2, [0, 8], True, args.use_depthwise_separable, args.depthwise_for_all_blocks, args.use_lightweight_lstm, args.lightweight_lstm_hidden_size, args.lightweight_lstm_bidirectional, args.lightweight_lstm_num_layers, args.use_lightweight_context, args.lightweight_context_hidden_size_ratio)
         
         # 모델 비교
         compare_models(models_info)
@@ -228,6 +256,12 @@ def main():
                 config.selected_channels = mic_array
                 config.use_depthwise_separable = args.use_depthwise_separable
                 config.depthwise_for_all_blocks = args.depthwise_for_all_blocks
+                config.use_lightweight_lstm = args.use_lightweight_lstm
+                config.lightweight_lstm_hidden_size = args.lightweight_lstm_hidden_size
+                config.lightweight_lstm_bidirectional = args.lightweight_lstm_bidirectional
+                config.lightweight_lstm_num_layers = args.lightweight_lstm_num_layers
+                config.use_lightweight_context = args.use_lightweight_context
+                config.lightweight_context_hidden_size_ratio = args.lightweight_context_hidden_size_ratio
                 
                 if args.optimize_two_channel and args.mic_num == 2:
                     config.optimize_for_two_channel = True
@@ -264,7 +298,7 @@ def main():
                 print(f"체크포인트 로드 실패: {str(e)}")
         else:
             # 체크포인트 없이 분석
-            analyze_model(args.mic_num, mic_array, args.optimize_two_channel, args.use_depthwise_separable, args.depthwise_for_all_blocks)
+            analyze_model(args.mic_num, mic_array, args.optimize_two_channel, args.use_depthwise_separable, args.depthwise_for_all_blocks, args.use_lightweight_lstm, args.lightweight_lstm_hidden_size, args.lightweight_lstm_bidirectional, args.lightweight_lstm_num_layers, args.use_lightweight_context, args.lightweight_context_hidden_size_ratio)
 
 if __name__ == "__main__":
     main() 

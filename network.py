@@ -80,21 +80,27 @@ class SelfAttention(nn.Module):
 
 class ContextModule(nn.Module):
     """컨텍스트 모듈 - 시간적 문맥 정보 추출"""
-    def __init__(self, in_features):
+    def __init__(self, in_features, use_lightweight=False, hidden_size_ratio=0.5):
         super(ContextModule, self).__init__()
+        
+        # 경량화 모드에 따라 은닉층 크기 결정
+        hidden_size = int(in_features * hidden_size_ratio) if use_lightweight else in_features // 2
         
         # 시간적 문맥 추출을 위한 LSTM
         self.lstm = nn.LSTM(
             input_size=in_features,
-            hidden_size=in_features // 2,  # 양방향이므로 절반으로
+            hidden_size=hidden_size,  # 경량화 모드에 따라 크기 조정
             num_layers=1,
             batch_first=True,
-            bidirectional=True
+            bidirectional=not use_lightweight  # 경량화 모드에 따라 양방향 여부 결정
         )
+        
+        # LSTM 출력 크기 계산 (양방향 여부에 따라 다름)
+        lstm_output_size = hidden_size * 2 if not use_lightweight else hidden_size
         
         # 출력 투영
         self.projection = nn.Sequential(
-            nn.Linear(in_features, in_features),
+            nn.Linear(lstm_output_size, in_features),
             nn.LayerNorm(in_features),
             nn.GELU()
         )
@@ -390,13 +396,26 @@ class AudioNetV3(nn.Module):
         if self.optimize_for_two_channel and microphone_num == 2:
             lstm_hidden_size = int(self.feature_maps[2] * 1.25)  
         
+        # 경량화 LSTM 설정 적용
+        use_lightweight_lstm = config.use_lightweight_lstm if config and hasattr(config, 'use_lightweight_lstm') else False
+        if use_lightweight_lstm:
+            # 경량화 LSTM 설정
+            lstm_hidden_size = config.lightweight_lstm_hidden_size if config and hasattr(config, 'lightweight_lstm_hidden_size') else 384
+            bidirectional = config.lightweight_lstm_bidirectional if config and hasattr(config, 'lightweight_lstm_bidirectional') else False
+            num_layers = config.lightweight_lstm_num_layers if config and hasattr(config, 'lightweight_lstm_num_layers') else 1
+            print(f"경량화 LSTM 사용: hidden_size={lstm_hidden_size}, bidirectional={bidirectional}, num_layers={num_layers}")
+        else:
+            # 기본 LSTM 설정
+            bidirectional = True
+            num_layers = 2
+        
         self.lstm = nn.LSTM(
             input_size=self.feature_maps[2] * 2,
             hidden_size=lstm_hidden_size,
-            num_layers=2,
+            num_layers=num_layers,
             batch_first=True,
             dropout=self.dropout_rate,
-            bidirectional=True
+            bidirectional=bidirectional
         )
         
         # 셀프 어텐션 모듈 추가
@@ -404,9 +423,23 @@ class AudioNetV3(nn.Module):
         
         # 컨텍스트 모듈 추가 
         if self.use_context_module:
-            self.context_module = ContextModule(self.feature_maps[2] * 2)
+            # 경량화 컨텍스트 모듈 설정 적용
+            use_lightweight_context = config.use_lightweight_context if config and hasattr(config, 'use_lightweight_context') else False
+            lightweight_context_hidden_size_ratio = config.lightweight_context_hidden_size_ratio if config and hasattr(config, 'lightweight_context_hidden_size_ratio') else 0.5
+            
+            self.context_module = ContextModule(
+                self.feature_maps[2] * 2,
+                use_lightweight=use_lightweight_context,
+                hidden_size_ratio=lightweight_context_hidden_size_ratio
+            )
+            
+            if use_lightweight_context:
+                print(f"경량화 Context Module 사용: hidden_size_ratio={lightweight_context_hidden_size_ratio}")
         
         # 출력 레이어 분리 (위치와 회전)
+        # LSTM 출력 크기 계산 (양방향 여부에 따라 다름)
+        lstm_output_size = lstm_hidden_size * 2 if bidirectional else lstm_hidden_size
+        
         # 셀프 어텐션과 컨텍스트 모듈을 통과한 후의 특성 크기는 feature_maps[2] * 2
         self.fc_position = nn.Linear(self.feature_maps[2] * 2, 3)
         
@@ -435,6 +468,23 @@ class AudioNetV3(nn.Module):
         print(f"위치-회전 연결 사용: {self.use_position_for_rotation}")
         print(f"2채널 최적화: {self.optimize_for_two_channel}")
         print(f"분리형 컨볼루션 사용: {self.use_depthwise_separable} (전체 블록: {self.depthwise_for_all_blocks})")
+        
+        # 경량화 정보 추가
+        use_lightweight_lstm = config.use_lightweight_lstm if config and hasattr(config, 'use_lightweight_lstm') else False
+        use_lightweight_context = config.use_lightweight_context if config and hasattr(config, 'use_lightweight_context') else False
+        
+        if use_lightweight_lstm or use_lightweight_context:
+            print("\n=== 경량화 설정 ===")
+            if use_lightweight_lstm:
+                lstm_hidden_size = config.lightweight_lstm_hidden_size if config and hasattr(config, 'lightweight_lstm_hidden_size') else 384
+                bidirectional = config.lightweight_lstm_bidirectional if config and hasattr(config, 'lightweight_lstm_bidirectional') else False
+                num_layers = config.lightweight_lstm_num_layers if config and hasattr(config, 'lightweight_lstm_num_layers') else 1
+                print(f"경량화 LSTM: hidden_size={lstm_hidden_size}, bidirectional={bidirectional}, num_layers={num_layers}")
+            
+            if use_lightweight_context:
+                lightweight_context_hidden_size_ratio = config.lightweight_context_hidden_size_ratio if config and hasattr(config, 'lightweight_context_hidden_size_ratio') else 0.5
+                print(f"경량화 Context Module: hidden_size_ratio={lightweight_context_hidden_size_ratio}")
+        
         print("===========================\n")
     
     def _initialize_weights(self):

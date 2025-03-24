@@ -186,7 +186,28 @@ if __name__ == "__main__":
                         help='Depthwise Separable Convolution 사용 비활성화')
     parser.add_argument('--depthwise_for_all_blocks', action='store_true',
                         help='모든 CNN 블록에 분리형 컨볼루션 적용 (기본값: False)')
-    parser.set_defaults(use_depthwise_separable=True)
+    
+    # LSTM 경량화 관련 인자 추가
+    parser.add_argument('--use_lightweight_lstm', dest='use_lightweight_lstm', action='store_true',
+                        help='경량화된 LSTM 사용 활성화 (기본값: True)')
+    parser.add_argument('--no_lightweight_lstm', dest='use_lightweight_lstm', action='store_false',
+                        help='경량화된 LSTM 사용 비활성화')
+    parser.add_argument('--lightweight_lstm_hidden_size', type=int, default=384,
+                        help='경량화된 LSTM의 은닉층 크기 (기본값: 384)')
+    parser.add_argument('--lightweight_lstm_bidirectional', action='store_true',
+                        help='경량화된 LSTM에서 양방향 사용 (기본값: False)')
+    parser.add_argument('--lightweight_lstm_num_layers', type=int, default=1,
+                        help='경량화된 LSTM의 레이어 수 (기본값: 1)')
+    
+    # Context Module 경량화 관련 인자 추가
+    parser.add_argument('--use_lightweight_context', dest='use_lightweight_context', action='store_true',
+                        help='경량화된 Context Module 사용 활성화 (기본값: True)')
+    parser.add_argument('--no_lightweight_context', dest='use_lightweight_context', action='store_false',
+                        help='경량화된 Context Module 사용 비활성화')
+    parser.add_argument('--lightweight_context_hidden_size_ratio', type=float, default=0.5,
+                        help='경량화된 Context Module의 은닉층 크기 비율 (기본값: 0.5)')
+    
+    parser.set_defaults(use_depthwise_separable=True, use_lightweight_lstm=True, use_lightweight_context=True)
     
     args = parser.parse_args()
     
@@ -218,6 +239,24 @@ if __name__ == "__main__":
     config.use_depthwise_separable = args.use_depthwise_separable
     config.depthwise_for_all_blocks = args.depthwise_for_all_blocks
     print(f"분리형 컨볼루션 사용: {config.use_depthwise_separable} (전체 블록: {config.depthwise_for_all_blocks})")
+    
+    # LSTM 경량화 설정 적용
+    config.use_lightweight_lstm = args.use_lightweight_lstm
+    config.lightweight_lstm_hidden_size = args.lightweight_lstm_hidden_size
+    config.lightweight_lstm_bidirectional = args.lightweight_lstm_bidirectional
+    config.lightweight_lstm_num_layers = args.lightweight_lstm_num_layers
+    
+    # Context Module 경량화 설정 적용
+    config.use_lightweight_context = args.use_lightweight_context
+    config.lightweight_context_hidden_size_ratio = args.lightweight_context_hidden_size_ratio
+    
+    if config.use_lightweight_lstm or config.use_lightweight_context:
+        print("\n=== 경량화 설정 ===")
+        if config.use_lightweight_lstm:
+            print(f"경량화 LSTM: hidden_size={config.lightweight_lstm_hidden_size}, bidirectional={config.lightweight_lstm_bidirectional}, num_layers={config.lightweight_lstm_num_layers}")
+        if config.use_lightweight_context:
+            print(f"경량화 Context Module: hidden_size_ratio={config.lightweight_context_hidden_size_ratio}")
+        print("=====================\n")
     
     # 시퀀스 길이 설정
     config.sequence_length = args.sequence_length
