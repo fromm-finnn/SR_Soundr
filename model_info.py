@@ -2,6 +2,7 @@ import os
 import torch
 import numpy as np
 import argparse
+import time
 from network import AudioNetV3
 from params import TrainingConfig
 
@@ -141,7 +142,6 @@ def analyze_model(mic_num, mic_array, optimize_two_channel=False, use_depthwise_
     sample_num = 2400
     input_tensor = torch.randn(batch_size, config.microphone_num, sample_num, sequence_length)
     
-    import time
     from thop import profile
     
     flops, params = profile(model, inputs=(input_tensor,))
@@ -276,12 +276,31 @@ def main():
                 )
                 
                 # 체크포인트 로드
-                checkpoint = torch.load(args.checkpoint, map_location='cpu')
-                model.load_state_dict(checkpoint['model_state_dict'])
-                print("체크포인트 로드 완료")
+                checkpoint = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
                 
-                # 파라미터 분석
-                count_parameters(model)
+                # 체크포인트 구조 확인 및 처리
+                try:
+                    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                        model.load_state_dict(checkpoint['model_state_dict'])
+                        print("일반 체크포인트 로드 완료")
+                    else:
+                        # 다른 형태의 모델일 수 있음
+                        try:
+                            # 직접 모델 상태인 경우
+                            model.load_state_dict(checkpoint)
+                            print("모델 상태 사전으로 직접 로드 완료")
+                        except Exception as e1:
+                            print(f"직접 로드 시도 실패: {str(e1)}")
+                except Exception as e:
+                    print(f"체크포인트 로드 실패: {str(e)}")
+                    print("체크포인트 분석을 건너뜁니다.")
+                
+                # 파라미터 분석 (가능한 경우만)
+                if hasattr(model, 'parameters'):
+                    try:
+                        count_parameters(model)
+                    except Exception as e:
+                        print(f"파라미터 분석 실패: {str(e)}")
                 
                 # 결과 출력
                 print(f"\n=== AudioNetV3 모델 정보 요약 ({args.mic_num}채널) ===")
@@ -298,7 +317,13 @@ def main():
                 print(f"체크포인트 로드 실패: {str(e)}")
         else:
             # 체크포인트 없이 분석
-            analyze_model(args.mic_num, mic_array, args.optimize_two_channel, args.use_depthwise_separable, args.depthwise_for_all_blocks, args.use_lightweight_lstm, args.lightweight_lstm_hidden_size, args.lightweight_lstm_bidirectional, args.lightweight_lstm_num_layers, args.use_lightweight_context, args.lightweight_context_hidden_size_ratio)
+            print("\n=== 모델 구조 분석 (체크포인트 없음) ===")
+            # 기본 모델 분석
+            model_info = analyze_model(args.mic_num, mic_array, args.optimize_two_channel, 
+                        args.use_depthwise_separable, args.depthwise_for_all_blocks, 
+                        args.use_lightweight_lstm, args.lightweight_lstm_hidden_size, 
+                        args.lightweight_lstm_bidirectional, args.lightweight_lstm_num_layers, 
+                        args.use_lightweight_context, args.lightweight_context_hidden_size_ratio)
 
 if __name__ == "__main__":
     main() 

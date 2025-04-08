@@ -162,6 +162,12 @@ def evaluate_model(model, test_loader, device, config):
                     
                     # 각 샘플별로 환경 분류하여 메트릭 계산
                     for i in range(batch_size):
+                        # batch_session_ids가 비어있거나 인덱스가 범위를 벗어나면 건너뜁니다
+                        if not batch_session_ids or i >= len(batch_session_ids):
+                            # 디버그 메시지 출력 (선택 사항)
+                            print(f"Warning: Skipping index {i}, batch_session_ids 길이: {len(batch_session_ids)}")
+                            continue
+                        
                         sess_id = batch_session_ids[i]
                         
                         # 환경 확인
@@ -381,6 +387,12 @@ def evaluate_model_basic(model, test_loader, device, config):
                 
                 # 각 샘플별로 환경 분류하여 메트릭 계산
                 for i in range(batch_size):
+                    # batch_session_ids가 비어있거나 인덱스가 범위를 벗어나면 건너뜁니다
+                    if not batch_session_ids or i >= len(batch_session_ids):
+                        # 디버그 메시지 출력 (선택 사항)
+                        print(f"Warning: Skipping index {i}, batch_session_ids 길이: {len(batch_session_ids)}")
+                        continue
+                        
                     sess_id = batch_session_ids[i]
                     
                     # 환경 확인

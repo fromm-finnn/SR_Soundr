@@ -122,7 +122,7 @@ def create_dataloaders(config):
     
     test_loader = DataLoader(
         test_dataset,
-        batch_size=config.test_batch_size,
+        batch_size=1,  # 테스트에서는 배치 크기를 1로 고정하여 인덱스 계산 오류 방지
         shuffle=False,
         num_workers=config.test_num_workers,
         pin_memory=config.pin_memory,
@@ -298,6 +298,12 @@ if __name__ == "__main__":
         try:
             # 모델 초기화 - AudioNetV3 모델 사용
             print("AudioNetV3 모델 사용")
+            # 데이터에 맞게 마이크 채널 수 조정
+            print(f"원래 설정된 마이크 채널 수: {config.microphone_num}")
+            real_mic_num = 4  # 변환된 STARSS2023 데이터는 항상 4개 채널
+            config.microphone_num = real_mic_num
+            print(f"실제 데이터에 맞게 마이크 채널 수 조정: {config.microphone_num}")
+            
             model = AudioNetV3(
                 sample_num=config.sample_num,
                 microphone_num=config.microphone_num,

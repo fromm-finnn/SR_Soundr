@@ -1,21 +1,14 @@
+# 큰 데이터 파일 제외
+data/
+data_doa/
+checkpoints/
+
+# 캐시와 결과 파일 제외
 __pycache__/
 cache/
-checkpoints/
-data/
-data_suss/
+results/
 split_info/
+
+# 시스템 파일 제외
+.DS_Store
 *.pyc
-*.pth
-*.npy
-*.npz
-*.pt
-*.log
-training_log.txt
-data/
-data_suss/
-__pycache__/
-*.pyc
-*.pth
-runs/
-checkpoints/
-.ipynb_checkpoints/

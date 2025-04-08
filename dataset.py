@@ -202,16 +202,17 @@ class AudioDataset(Dataset):
             elif curr_room != ref_room:
                 self.environment_sessions['diff_user_diff_space'].append(sess_id)
 
-        # 선택된 환경의 세션만 사용
-        selected_env_sessions = self.environment_sessions[env_type]
-        print(f"\n선택된 환경: {env_type}")
-        print(f"전체 세션 수: {len(selected_env_sessions)}")
+        # 모든 세션 사용 (환경 타입에 관계없이)
+        print("\n모든 세션을 사용합니다!")
+        all_sessions = list(range(len(self.starts)))
+        print(f"환경 타입 '{env_type}'에서 모든 세션으로 변경")
+        print(f"전체 세션 수: {len(all_sessions)}")
         
         # 모든 시퀀스를 하나로 모으기
         self.all_sequences = []
         self.session_map_full = []  # 각 시퀀스가 어느 세션에서 왔는지 추적
         
-        for sess_id in selected_env_sessions:
+        for sess_id in all_sessions:
             session = self.starts[sess_id]
             start_idx = session['start']
             end_idx = session['end']
@@ -262,42 +263,66 @@ class AudioDataset(Dataset):
             raise ValueError(f"분할 비율의 합이 1이 되어야 합니다. (현재: {total_ratio})")
 
     def print_dataset_summary(self):
-        """전체 데이터셋 요약 정보 출력 (한 번만 호출)"""
-        n_total = AudioDataset._total_sequences
-        n_train = AudioDataset._train_count
-        n_val = AudioDataset._val_count
-        n_test = AudioDataset._test_count
+        """데이터셋 요약 정보 출력"""
+        print("\n=== 데이터셋 요약 ===")
         
-        print("\n=== 데이터셋 초기화 요약 ===")
-        print(f"환경 타입: {self.environment_type}")
-        print(f"총 세션 수: {len(self.environment_sessions[self.environment_type])}")
-        print(f"총 데이터 포인트 수: {n_total:,}")
+        # 기본 정보
+        total_samples = len(self.inputs)
+        print(f"총 샘플 수: {total_samples:,}")
+        print(f"입력 형태: {self.inputs.shape}")
+        print(f"출력 형태: {self.outputs.shape}")
+        print(f"세션 수: {len(self.starts)}")
         
-        print("\n데이터 분할:")
-        print(f"- 학습: {n_train:,} 포인트 ({n_train/n_total:.1%})")
-        print(f"- 검증: {n_val:,} 포인트 ({n_val/n_total:.1%})")
-        print(f"- 테스트: {n_test:,} 포인트 ({n_test/n_total:.1%})")
+        # 위치 및 쿼터니언 정보
+        positions = self.outputs[:, :3]  # 위치 (x, y, z)
+        quaternions = self.outputs[:, 3:7]  # 쿼터니언 (w, x, y, z)
         
-        # 각도 분포 분석
-        train_angles = self.get_sequence_angles(self.outputs[self.indices], self.sequence_length)
-        print("\n=== 학습 데이터 각도 분포 ===")
-        print(f"Yaw 범위: {np.min(train_angles[:,0]):.1f}° ~ {np.max(train_angles[:,0]):.1f}°")
-        print(f"Pitch 범위: {np.min(train_angles[:,1]):.1f}° ~ {np.max(train_angles[:,1]):.1f}°")
+        # 노름이 0인 쿼터니언 통계
+        quat_norms = np.linalg.norm(quaternions, axis=1)
+        zero_norm_count = np.sum(quat_norms < 1e-5)
+        print(f"노름이 0인 쿼터니언 비율: {zero_norm_count / len(quaternions) * 100:.2f}%")
         
-        # 세션별 데이터 분포 표 형식으로 출력
-        print("\n세션별 데이터 분포:")
-        print("세션 ID | 학습 | 검증 | 테스트 | 합계")
-        print("--------|------|------|--------|------")
+        # 위치 통계
+        x_min, y_min, z_min = np.min(positions, axis=0)
+        x_max, y_max, z_max = np.max(positions, axis=0)
+        print(f"위치 범위:")
+        print(f"  X: {x_min:.2f} ~ {x_max:.2f}")
+        print(f"  Y: {y_min:.2f} ~ {y_max:.2f}")
+        print(f"  Z: {z_min:.2f} ~ {z_max:.2f}")
         
-        # 각 세션별 데이터 포인트 수 계산
-        unique_sessions = np.unique(self.session_map_full)
-        for sess_id in unique_sessions:
-            train_count = np.sum(self.session_map_full[:n_train] == sess_id)
-            val_count = np.sum(self.session_map_full[n_train:n_train+n_val] == sess_id)
-            test_count = np.sum(self.session_map_full[n_train+n_val:] == sess_id)
-            total_count = train_count + val_count + test_count
+        # 각도 정보 (노름이 0이 아닌 샘플만 사용)
+        valid_quaternions = quaternions[quat_norms >= 1e-5]
+        if len(valid_quaternions) > 0:
+            # 단위 벡터로 정규화
+            valid_quaternions = valid_quaternions / np.linalg.norm(valid_quaternions, axis=1, keepdims=True)
+            # 처음 100개 샘플의 각도 계산
+            sample_indices = np.arange(0, min(len(valid_quaternions), 100))
+            sample_quats = valid_quaternions[sample_indices]
             
-            print(f"{sess_id:8d} | {train_count:4d} | {val_count:4d} | {test_count:6d} | {total_count:5d}")
+            rots = R.from_quat(sample_quats)
+            eulers = rots.as_euler('zyx', degrees=True)
+            
+            yaw_angles = eulers[:, 0]  # z축 각도 (요)
+            pitch_angles = eulers[:, 1]  # y축 각도 (피치)
+            
+            print(f"Yaw 범위 (샘플): {np.min(yaw_angles):.1f}° ~ {np.max(yaw_angles):.1f}°")
+            print(f"Pitch 범위 (샘플): {np.min(pitch_angles):.1f}° ~ {np.max(pitch_angles):.1f}°")
+        else:
+            print("경고: 유효한 쿼터니언이 없습니다")
+        
+        # 세션 통계
+        session_lengths = [session['end'] - session['start'] for session in self.starts]
+        min_length = min(session_lengths)
+        max_length = max(session_lengths)
+        avg_length = sum(session_lengths) / len(session_lengths)
+        print(f"세션 길이: 최소 {min_length}, 최대 {max_length}, 평균 {avg_length:.1f}")
+        
+        # 환경 통계
+        print("\n환경별 세션 수:")
+        for env, sessions in self.environment_sessions.items():
+            print(f"  {env}: {len(sessions):,} 세션")
+            
+        print("===============")
 
     def print_dataset_statistics(self):
         """현재 모드의 데이터셋 통계 출력"""
@@ -307,23 +332,30 @@ class AudioDataset(Dataset):
         print(f"데이터 포인트 수: {len(self.indices):,}")
 
     def get_sequence_angles(self, outputs, sequence_length):
-        """시퀀스의 각도 정보 추출"""
+        """시퀀스의 각도 정보 계산"""
         angles = []
-        for i in range(0, len(outputs), sequence_length):
-            if i + sequence_length > len(outputs):
-                break
+        for i in range(0, min(len(outputs), 100), sequence_length):
+            # 쿼터니언 추출
+            quat = outputs[i, 3:7]
+            
+            # 노름이 0인 쿼터니언 확인 및 처리
+            norm = np.linalg.norm(quat)
+            if norm < 1e-5:
+                # 기본 단위 쿼터니언 [1, 0, 0, 0] 사용 (정면 방향)
+                quat = np.array([1.0, 0.0, 0.0, 0.0])
+            else:
+                # 단위 벡터로 정규화
+                quat = quat / norm
                 
-            # 쿼터니언에서 오일러 각도로 변환
-            quat = outputs[i, 3:7]  # 쿼터니언 (w, x, y, z)
+            # 쿼터니언을 회전 객체로 변환
             rot = R.from_quat(quat)
-            euler = rot.as_euler('xyz', degrees=True)
             
-            # yaw와 pitch 추출
-            yaw = euler[2]   # z축 회전
-            pitch = euler[1]  # y축 회전
+            # 오일러 각(각도)으로 변환 - ZYX 회전 순서 사용 (z는 요, y는 피치, x는 롤)
+            euler = rot.as_euler('zyx', degrees=True)
             
-            angles.append([yaw, pitch])
-        return np.array(angles)
+            angles.append(euler[0])  # z축 각도 (요/방위각) 사용
+        
+        return angles
 
     def augment_audio(self, audio, position, quaternion):
         """
@@ -462,14 +494,25 @@ class AudioDataset(Dataset):
         x = self.inputs[sequence_indices]  # [sequence_length, all_channels, samples]
         
         try:
-            # 채널 선택 및 다운샘플링
-            x = x[:, self.selected_channels]   # [sequence_length, n_selected_channels, samples]
-            x = x[:, :, ::4]                   # 4배 다운샘플링
+            # 채널 선택 - 데이터에 맞게 조정
+            all_channels = x.shape[1]
+            if all_channels == 4:
+                # 실제 데이터에는 4개 채널만 있음: 4개 모두 사용
+                selected_channels = list(range(all_channels))
+                if idx == 0:  # 첫 번째 호출에서만 메시지 출력
+                    print(f"데이터에 맞게 채널 조정됨: {selected_channels} (원래 선택: {self.selected_channels})")
+            else:
+                # 실제 채널이 더 많은 경우 원래 선택된 채널 사용
+                selected_channels = self.selected_channels
+                
+            x = x[:, selected_channels]   # [sequence_length, n_selected_channels, samples]
+            x = x[:, :, ::4]              # 4배 다운샘플링
         except Exception as e:
             print(f"\n=== 오류 발생: __getitem__ 채널 선택 중 ===")
             print(f"오류 메시지: {str(e)}")
             print(f"입력 데이터 형태: {x.shape}")
             print(f"선택할 채널: {self.selected_channels}")
+            print(f"실제 채널 수: {all_channels}")
             raise e
         
         # 정규화
@@ -483,6 +526,15 @@ class AudioDataset(Dataset):
         y = self.outputs[start_idx]
         position = y[:3]
         quaternion = y[3:7]
+        
+        # 쿼터니언 유효성 검사 및 처리
+        quat_norm = np.linalg.norm(quaternion)
+        if quat_norm < 1e-5:
+            # 노름이 0인 쿼터니언은 기본 단위 쿼터니언 사용 (정면 방향)
+            quaternion = np.array([1.0, 0.0, 0.0, 0.0])
+        else:
+            # 이미 유효한 쿼터니언이면 정규화
+            quaternion = quaternion / quat_norm
         
         # 각도 증강 적용
         if self.mode == 'train' and self.use_augmentation:
@@ -504,27 +556,34 @@ class AudioDataset(Dataset):
         
     def get_session_ids(self, batch_idx, real_batch_size):
         """실제 배치 크기를 고려하여 세션 ID 반환"""
-        # config의 batch_size 대신 실제 배치 크기 사용
-        start_idx = batch_idx * self.config.batch_size
-        end_idx = start_idx + real_batch_size
+        # 데이터셋 크기를 고려하여 안전하게 인덱스 계산
+        # 복제 방지를 위한 실제 배치 인덱스 계산
+        dataset_size = len(self)
         
-        if start_idx >= len(self):
-            print(f"Warning: start_idx {start_idx} exceeds dataset size {len(self)}")
+        # 새로운 계산 방식: batch_idx는 실제 배치 번호로 간주
+        start_idx = batch_idx * real_batch_size
+        end_idx = min(start_idx + real_batch_size, dataset_size)
+        
+        if start_idx >= dataset_size:
+            print(f"Warning: start_idx {start_idx} exceeds dataset size {dataset_size}")
             return []
-                
-        if end_idx > len(self):
-            end_idx = len(self)
-            print(f"Debug: Adjusted end_idx to {end_idx}")
         
+        if end_idx > dataset_size:
+            print(f"Debug: Adjusted end_idx from {start_idx + real_batch_size} to {end_idx}")
+            
         session_ids = []
         for idx in range(start_idx, end_idx):
+            if idx >= dataset_size:
+                break
+                
             real_idx = self.indices[idx]
             
             # 세션 찾기
             for sess_id, session in enumerate(self.starts):
                 if session['start'] <= real_idx < session['end']:
                     session_ids.append(sess_id)
-                    break        
+                    break
+                    
         return session_ids
         
     @staticmethod
